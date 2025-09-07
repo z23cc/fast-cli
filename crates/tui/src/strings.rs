@@ -60,6 +60,7 @@ pub fn build_stick_label(scroll: u16) -> String {
 // - search_info: Some((query, current_index_1_based, total_hits))
 // - max_width: available width for the status text
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn build_status_line(
     stick: &str,
     focus: &str,
@@ -67,10 +68,15 @@ pub fn build_status_line(
     col_disp: u16,
     history_len: usize,
     context_len: usize,
+    provider: Option<(&str, &str, &str)>,
     search_info: Option<(String, usize, usize)>,
     max_width: u16,
 ) -> String {
     let mut segments: Vec<String> = Vec::new();
+    // Put provider info first for higher visibility on narrow terminals
+    if let Some((prov, model, wire)) = provider {
+        segments.push(format!("[{}][{}][{}]", prov, model, wire));
+    }
     segments.push(format!("[{}][{}] L{} C{}", stick, focus, line_disp, col_disp));
     segments.push(format!("Hist:{}", history_len));
     segments.push(format!("Ctx:{}", context_len));

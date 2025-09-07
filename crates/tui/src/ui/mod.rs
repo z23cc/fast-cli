@@ -447,6 +447,7 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App, _input_visible_lines: u16, 
         col_disp,
         app.history.len(),
         app.context_items.len(),
+        Some(("OpenAI", &app.model_label, &app.wire_label)),
         app.search_query
             .as_ref()
             .map(|q| (q.clone(), app.search_current + 1, app.search_hits.len())),

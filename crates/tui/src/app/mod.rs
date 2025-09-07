@@ -2,6 +2,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 use unicode_segmentation::UnicodeSegmentation;
+use fast_core::llm::ModelClient as _;
+use tracing::{info, error};
 
 pub mod chat;
 pub mod history;
@@ -101,6 +103,11 @@ pub struct App {
     pub context_scroll: u16,
     pub context_current: usize,
     pub palette: Option<PaletteState>,
+    pub llm_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    // Provider/model info for status bar
+    pub provider_label: String,
+    pub model_label: String,
+    pub wire_label: String,
 }
 
 impl App {
@@ -146,7 +153,16 @@ impl App {
             context_scroll: 0,
             context_current: 0,
             palette: None,
+            llm_rx: None,
+            provider_label: String::from("OpenAI"),
+            model_label: String::from("gpt-5"),
+            wire_label: String::from("responses"),
         };
+        // Try to read provider config for status
+        if let Ok(cfg) = providers::openai::config::OpenAiConfig::from_env_and_file() {
+            s.model_label = cfg.model.clone();
+            s.wire_label = cfg.wire_api.clone();
+        }
         if let Ok(Some(p)) = crate::persist::load_state() {
             if !p.sessions.is_empty() {
                 s.sessions = p.sessions;
@@ -177,14 +193,63 @@ impl App {
         self.messages.push(Message::user(text.clone()));
         self.collapsed.push(false);
 
-        let assistant_index = self.messages.len();
+        let _assistant_index = self.messages.len();
         self.messages.push(Message::assistant(String::new()));
         self.collapsed.push(false);
-        let content = format!("You said: {}", text);
-        self.stream = Some(StreamState {
-            target_index: assistant_index,
-            content,
-            pos: 0,
+        // Start real LLM streaming in a background thread
+        let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+        self.llm_rx = Some(rx);
+        // Build snapshot for provider: drop any assistant messages before the
+        // first user message (e.g., the initial welcome banner), and skip
+        // empty assistant placeholders we append for streaming.
+        let first_user_idx = self
+            .messages
+            .iter()
+            .position(|m| matches!(m.role, Role::User))
+            .unwrap_or(0);
+        let msgs_snapshot = self
+            .messages[first_user_idx..]
+            .iter()
+            .filter(|m| !(matches!(m.role, Role::Assistant) && m.content.trim().is_empty()))
+            .map(|m| fast_core::llm::Message {
+                role: match m.role {
+                    Role::User => fast_core::llm::Role::User,
+                    Role::Assistant => fast_core::llm::Role::Assistant,
+                },
+                content: m.content.clone(),
+            })
+            .collect::<Vec<_>>();
+        // Log submit intent (model/wire)
+        info!(target: "tui", "submit: model={} wire={} input_len={} chars", self.model_label, self.wire_label, text.len());
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().expect("rt");
+            let _ = rt.block_on(async move {
+                let cfg = match providers::openai::config::OpenAiConfig::from_env_and_file() {
+                    Ok(c) => c,
+                    Err(e) => { let _ = tx.send(Err(format!("config: {}", e))); error!(target: "tui", "submit config error: {}", e); return; }
+                };
+                let client = match providers::openai::OpenAiClient::new(cfg.clone()) {
+                    Ok(c) => c,
+                    Err(e) => { let _ = tx.send(Err(format!("client: {}", e))); error!(target: "tui", "submit client build error: {}", e); return; }
+                };
+                let opts = fast_core::llm::ChatOpts { model: cfg.model.clone(), temperature: None, top_p: None, max_tokens: None };
+                let wire = match cfg.wire_api.as_str() { "chat"=>fast_core::llm::ChatWire::Chat, "responses"=>fast_core::llm::ChatWire::Responses, _=>fast_core::llm::ChatWire::Responses };
+                let res = client.stream_chat(msgs_snapshot, opts, wire).await;
+                match res {
+                    Ok(mut s) => {
+                        use futures::StreamExt;
+                        while let Some(it) = s.next().await {
+                            match it {
+                                Ok(fast_core::llm::ChatDelta::Text(t)) => { let _ = tx.send(Ok(t)); }
+                                Ok(fast_core::llm::ChatDelta::Finish(_)) => break,
+                                Ok(_) => {}
+                                Err(e) => { let _ = tx.send(Err(format!("{}", e))); error!(target: "tui", "stream delta error: {}", e); break; }
+                            }
+                        }
+                    }
+                    Err(e) => { let _ = tx.send(Err(format!("{}", e))); error!(target: "tui", "stream start error: {}", e); }
+                }
+            });
         });
         self.input.clear();
         self.input_cursor = 0;
@@ -443,10 +508,12 @@ impl App {
                 }
 
                 KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    info!(target: "tui", "on_key: Shift+Enter => newline");
                     self.insert_text("\n");
                 }
                 KeyCode::Enter => {
                     if matches!(self.focus, Focus::Input) {
+                        info!(target: "tui", "on_key: Enter => submit");
                         self.submit();
                     }
                 }
@@ -669,6 +736,25 @@ impl App {
                 let _ = crate::persist::save_session(self.current_session_name(), &self.messages);
             }
             self.dirty = true;
+        }
+        // Drain LLM streaming receiver
+        if let Some(rx) = &self.llm_rx {
+            for _ in 0..64 {
+                match rx.try_recv() {
+                    Ok(Ok(s)) => {
+                        if let Some(msg) = self.messages.last_mut() { msg.content.push_str(&s); }
+                        self.dirty = true;
+                        self.stick_to_bottom = true;
+                    }
+                    Ok(Err(e)) => {
+                        if let Some(msg) = self.messages.last_mut() { msg.content.push_str(&format!("\n[error] {}", e)); }
+                        self.llm_rx = None;
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => { break; }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => { self.llm_rx = None; break; }
+                }
+            }
         }
     }
 }

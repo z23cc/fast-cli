@@ -2,7 +2,7 @@
 members = [
     "crates/tui",
     "crates/core",
+    "crates/providers",
 ]
 
 resolver = "2"
-
