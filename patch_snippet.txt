@@ -1,0 +1,11 @@
+build_status_line(
+        &stick,
+        focus,
+        line_disp,
+        col_disp,
+        app.history.len(),
+        app.search_query
+            .as_ref()
+            .map(|q| (q.clone(), app.search_current + 1, app.search_hits.len())),
+        area.width.saturating_sub(2),
+    );

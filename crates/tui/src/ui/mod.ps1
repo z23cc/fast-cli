@@ -438,7 +438,6 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App, _input_visible_lines: u16, 
     let focus = match app.focus {
         crate::app::Focus::Input => "Input",
         crate::app::Focus::Sidebar => "Sessions",
-        crate::app::Focus::Context => "Context",
     };
     let tips = build_status_line(
         &stick,
@@ -446,7 +445,6 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App, _input_visible_lines: u16, 
         line_disp,
         col_disp,
         app.history.len(),
-        app.context_items.len(),
         app.search_query
             .as_ref()
             .map(|q| (q.clone(), app.search_current + 1, app.search_hits.len())),
@@ -752,4 +750,5 @@ mod tests {
     }
 }
 */
+
 

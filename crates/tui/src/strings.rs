@@ -15,6 +15,7 @@ pub const TITLE_HELP: &str = " Help / Shortcuts ";
 pub const TITLE_SEARCH: &str = " Search ";
 pub const TITLE_RENAME: &str = " Rename Session ";
 pub const TITLE_CONFIRM: &str = " Confirm ";
+pub const TITLE_CONTEXT: &str = " Context ";
 
 // Confirm messages
 pub fn confirm_delete_session_message(name: &str) -> String {
@@ -58,18 +59,21 @@ pub fn build_stick_label(scroll: u16) -> String {
 // - history_len: input history length
 // - search_info: Some((query, current_index_1_based, total_hits))
 // - max_width: available width for the status text
+#[allow(clippy::too_many_arguments)]
 pub fn build_status_line(
     stick: &str,
     focus: &str,
     line_disp: u16,
     col_disp: u16,
     history_len: usize,
+    context_len: usize,
     search_info: Option<(String, usize, usize)>,
     max_width: u16,
 ) -> String {
     let mut segments: Vec<String> = Vec::new();
     segments.push(format!("[{}][{}] L{} C{}", stick, focus, line_disp, col_disp));
     segments.push(format!("Hist:{}", history_len));
+    segments.push(format!("Ctx:{}", context_len));
     if let Some((q, cur, total)) = search_info {
         segments.push(if total > 0 {
             format!("Search:{} ({}/{})", q, cur, total)

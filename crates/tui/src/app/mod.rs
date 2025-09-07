@@ -36,10 +36,11 @@ impl Message {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
     Input,
     Sidebar,
+    Context,
 }
 
 pub struct RenameState {
@@ -93,6 +94,13 @@ pub struct App {
     pub input_visible_lines: u16,
     pub input_max_lines: u16,
     pub dirty: bool,
+    // Context pane
+    pub show_context: bool,
+    pub context_items: Vec<String>,
+    pub context_area: Option<ratatui::layout::Rect>,
+    pub context_scroll: u16,
+    pub context_current: usize,
+    pub palette: Option<PaletteState>,
 }
 
 impl App {
@@ -132,6 +140,12 @@ impl App {
             input_visible_lines: 1,
             input_max_lines: 6,
             dirty: true,
+            show_context: false,
+            context_items: Vec::new(),
+            context_area: None,
+            context_scroll: 0,
+            context_current: 0,
+            palette: None,
         };
         if let Ok(Some(p)) = crate::persist::load_state() {
             if !p.sessions.is_empty() {
@@ -181,6 +195,52 @@ impl App {
 
     pub fn on_key(&mut self, key: KeyEvent) {
         if let KeyEventKind::Press = key.kind {
+            if let Some(p) = &mut self.palette {
+                match key.code {
+                    KeyCode::Esc => { self.palette = None; }
+                    KeyCode::Enter => {
+                        if let Some(act) = p.filtered.get(p.selected).cloned() {
+                            self.execute_palette_action(&act);
+                            self.palette = None;
+                        }
+                    }
+                    KeyCode::Up => { if p.selected > 0 { p.selected -= 1; } }
+                    KeyCode::Down => { if p.selected + 1 < p.filtered.len() { p.selected += 1; } }
+                    KeyCode::Backspace => {
+                        if p.cursor > 0 {
+                            let mut parts: Vec<&str> = p.buffer.graphemes(true).collect();
+                            let c = p.cursor.min(parts.len());
+                            parts.remove(c - 1);
+                            p.buffer = parts.concat();
+                            p.cursor -= 1;
+                            App::palette_filter(p);
+                        }
+                    }
+                    KeyCode::Delete => {
+                        let mut parts: Vec<&str> = p.buffer.graphemes(true).collect();
+                        let c = p.cursor.min(parts.len());
+                        if c < parts.len() { parts.remove(c); p.buffer = parts.concat(); App::palette_filter(p); }
+                    }
+                    KeyCode::Left => { if p.cursor > 0 { p.cursor -= 1; } }
+                    KeyCode::Right => { let l = p.buffer.graphemes(true).count(); if p.cursor < l { p.cursor += 1; } }
+                    KeyCode::Home => { p.cursor = 0; }
+                    KeyCode::End => { p.cursor = p.buffer.graphemes(true).count(); }
+                    KeyCode::Char(ch) => {
+                        if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                            let mut parts: Vec<&str> = p.buffer.graphemes(true).collect();
+                            let c = p.cursor.min(parts.len());
+                            let mut buf = [0u8; 4];
+                            parts.insert(c, ch.encode_utf8(&mut buf));
+                            p.buffer = parts.concat();
+                            p.cursor += 1;
+                            App::palette_filter(p);
+                        }
+                    }
+                    _ => {}
+                }
+                return;
+            }
+
             if self.show_help {
                 match key.code {
                     KeyCode::Esc | KeyCode::F(1) => {
@@ -351,6 +411,9 @@ impl App {
                     self.should_quit = true;
                 }
                 KeyCode::Esc => self.should_quit = true,
+                KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.open_palette();
+                }
                 KeyCode::F(1) => {
                     self.show_help = true;
                 }
@@ -365,10 +428,18 @@ impl App {
                     self.next_search_hit();
                 }
                 KeyCode::Tab => {
-                    self.focus = match self.focus {
-                        Focus::Input => Focus::Sidebar,
-                        Focus::Sidebar => Focus::Input,
-                    };
+                    // Cycle focus across visible panes: Input -> Sidebar? -> Context? -> Input
+                    let mut order = Vec::new();
+                    order.push(Focus::Input);
+                    if self.show_sidebar { order.push(Focus::Sidebar); }
+                    if self.show_context { order.push(Focus::Context); }
+                    // find next
+                    if let Some(pos) = order.iter().position(|f| *f == self.focus) {
+                        let next = (pos + 1) % order.len();
+                        self.focus = order[next];
+                    } else {
+                        self.focus = Focus::Input;
+                    }
                 }
 
                 KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -401,7 +472,12 @@ impl App {
                     self.move_cursor_line_end();
                 }
                 KeyCode::Char(ch) => {
-                    if matches!(self.focus, Focus::Sidebar) {
+                    if matches!(self.focus, Focus::Context) {
+                        match ch {
+                            'a' | 'A' => { self.open_context_add(); }
+                            _ => {}
+                        }
+                    } else if matches!(self.focus, Focus::Sidebar) {
                         match ch {
                             'n' | 'N' => {
                                 self.sidebar_new_session();
@@ -545,8 +621,27 @@ impl App {
                     self.show_sidebar = !self.show_sidebar;
                     let _ = crate::persist::save_state(self);
                 }
+                KeyCode::F(6) => {
+                    self.show_context = !self.show_context;
+                    self.dirty = true;
+                }
                 KeyCode::Delete if matches!(self.focus, Focus::Sidebar) => {
                     self.sidebar_delete_current();
+                }
+                // Context pane shortcuts
+                KeyCode::Up if matches!(self.focus, Focus::Context) => {
+                    if self.context_current > 0 { self.context_current -= 1; }
+                }
+                KeyCode::Down if matches!(self.focus, Focus::Context) => {
+                    if self.context_current + 1 < self.context_items.len() { self.context_current += 1; }
+                }
+                KeyCode::Delete if matches!(self.focus, Focus::Context) => {
+                    if self.context_current < self.context_items.len() {
+                        self.context_items.remove(self.context_current);
+                        if self.context_current >= self.context_items.len() && !self.context_items.is_empty() {
+                            self.context_current = self.context_items.len() - 1;
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -596,6 +691,109 @@ struct StreamState {
     target_index: usize,
     content: String,
     pos: usize,
+}
+
+#[derive(Clone)]
+pub struct PaletteState {
+    pub buffer: String,
+    pub cursor: usize,
+    pub filtered: Vec<PaletteAction>,
+    pub selected: usize,
+}
+
+#[derive(Clone)]
+pub enum PaletteAction {
+    ToggleSidebar,
+    ToggleContext,
+    NewSession,
+    RenameSession,
+    DeleteSession,
+    OpenSearch,
+    Quit,
+}
+
+impl PaletteAction {
+    pub fn label(&self) -> &'static str {
+        match self {
+            PaletteAction::ToggleSidebar => "Toggle sidebar",
+            PaletteAction::ToggleContext => "Toggle context",
+            PaletteAction::NewSession => "New session",
+            PaletteAction::RenameSession => "Rename session",
+            PaletteAction::DeleteSession => "Delete session",
+            PaletteAction::OpenSearch => "Open search",
+            PaletteAction::Quit => "Quit",
+        }
+    }
+}
+
+impl App {
+    pub fn open_palette(&mut self) {
+        let mut st = PaletteState { buffer: String::new(), cursor: 0, filtered: Vec::new(), selected: 0 };
+        self.refresh_palette_filtered(&mut st);
+        self.palette = Some(st);
+    }
+
+    fn refresh_palette_filtered(&self, st: &mut PaletteState) {
+        let all = vec![
+            PaletteAction::ToggleSidebar,
+            PaletteAction::ToggleContext,
+            PaletteAction::NewSession,
+            PaletteAction::RenameSession,
+            PaletteAction::DeleteSession,
+            PaletteAction::OpenSearch,
+            PaletteAction::Quit,
+        ];
+        let q = st.buffer.to_lowercase();
+        st.filtered = if q.is_empty() {
+            all
+        } else {
+            all.into_iter()
+                .filter(|a| a.label().to_lowercase().contains(&q))
+                .collect()
+        };
+        st.selected = st.selected.min(st.filtered.len().saturating_sub(1));
+    }
+
+    fn execute_palette_action(&mut self, act: &PaletteAction) {
+        match act {
+            PaletteAction::ToggleSidebar => { self.show_sidebar = !self.show_sidebar; let _ = crate::persist::save_state(self); }
+            PaletteAction::ToggleContext => { self.show_context = !self.show_context; }
+            PaletteAction::NewSession => { self.sidebar_new_session(); }
+            PaletteAction::RenameSession => { self.sidebar_rename_current(); }
+            PaletteAction::DeleteSession => { self.sidebar_delete_current(); }
+            PaletteAction::OpenSearch => { self.open_search(); }
+            PaletteAction::Quit => { self.should_quit = true; }
+        }
+        self.dirty = true;
+    }
+
+    pub fn open_context_add(&mut self) {
+        // Reuse search input as simple line editor for context entry (e.g., file path or note)
+        self.search_input = Some(SearchInput { buffer: String::new(), cursor: 0 });
+    }
+}
+
+impl App {
+    fn palette_filter(st: &mut PaletteState) {
+        let all = vec![
+            PaletteAction::ToggleSidebar,
+            PaletteAction::ToggleContext,
+            PaletteAction::NewSession,
+            PaletteAction::RenameSession,
+            PaletteAction::DeleteSession,
+            PaletteAction::OpenSearch,
+            PaletteAction::Quit,
+        ];
+        let q = st.buffer.to_lowercase();
+        st.filtered = if q.is_empty() {
+            all
+        } else {
+            all.into_iter()
+                .filter(|a| a.label().to_lowercase().contains(&q))
+                .collect()
+        };
+        st.selected = st.selected.min(st.filtered.len().saturating_sub(1));
+    }
 }
 
 #[derive(Clone)]
