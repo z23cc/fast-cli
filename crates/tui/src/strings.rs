@@ -7,6 +7,34 @@ pub const PREFIX_ASSISTANT: &str = "Assistant: ";
 
 pub const INPUT_HINT: &str = "Type message, Enter to send / Shift+Enter for newline";
 
+// UI block titles (keep surrounding spaces for visual padding)
+pub const TITLE_SESSIONS: &str = " Sessions ";
+pub const TITLE_CHAT: &str = " Chat ";
+pub const TITLE_INPUT: &str = " Input ";
+pub const TITLE_HELP: &str = " Help / Shortcuts ";
+pub const TITLE_SEARCH: &str = " Search ";
+pub const TITLE_RENAME: &str = " Rename Session ";
+pub const TITLE_CONFIRM: &str = " Confirm ";
+
+// Confirm messages
+pub fn confirm_delete_session_message(name: &str) -> String {
+    format!(
+        "Delete session \"{}\"? Press Y to confirm, N/Esc to cancel.",
+        name
+    )
+}
+
+// Collapse/expand indicators for long messages
+pub fn indicator_expand(remaining: usize) -> String {
+    // Example: "Expand (12 more lines)"
+    format!("Expand ({} more lines)", remaining)
+}
+
+pub fn indicator_collapse(total: usize) -> String {
+    // Example: "Collapse (120 total lines)"
+    format!("Collapse ({} total lines)", total)
+}
+
 // Build the status bar line with width-aware compaction.
 // - stick: e.g., "Bottom" or "^12 lines"
 // - focus: e.g., "Input" or "Sessions"

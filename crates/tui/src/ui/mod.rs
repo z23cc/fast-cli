@@ -10,7 +10,23 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Role};
-use crate::strings::{build_status_line, help_lines_ascii, INPUT_HINT, PREFIX_ASSISTANT, PREFIX_USER};
+use crate::strings::{
+    build_status_line,
+    help_lines_ascii,
+    confirm_delete_session_message,
+    indicator_collapse,
+    indicator_expand,
+    INPUT_HINT,
+    PREFIX_ASSISTANT,
+    PREFIX_USER,
+    TITLE_CHAT,
+    TITLE_CONFIRM,
+    TITLE_HELP,
+    TITLE_INPUT,
+    TITLE_RENAME,
+    TITLE_SEARCH,
+    TITLE_SESSIONS,
+};
 use crate::theme::THEME;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -46,7 +62,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App) {
     let focused = matches!(app.focus, crate::app::Focus::Sidebar);
     let title = Span::styled(
-        " Sessions ",
+        TITLE_SESSIONS,
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
@@ -147,7 +163,7 @@ fn draw_main(f: &mut Frame, area: Rect, app: &mut App) {
 
 fn draw_chat(f: &mut Frame, area: Rect, app: &mut App) {
     let block = Block::default()
-        .title(" Chat ")
+        .title(TITLE_CHAT)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(THEME.chat_border));
 
@@ -186,12 +202,9 @@ fn draw_chat(f: &mut Frame, area: Rect, app: &mut App) {
         let preview = app.collapse_preview_lines;
         let threshold = app.collapse_threshold_lines;
         let (display_count, indicator): (usize, Option<String>) = if collapsed && base > preview {
-            (
-                preview,
-                Some(format!("... Expand ({} more lines)", base - preview)),
-            )
+            (preview, Some(indicator_expand(base - preview)))
         } else if !collapsed && base > threshold {
-            (base, Some(format!("Collapse ({} total lines)", base)))
+            (base, Some(indicator_collapse(base)))
         } else {
             (base, None)
         };
@@ -309,7 +322,7 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App, input_visible_lines: u16, in
         Style::default().fg(THEME.border_inactive)
     };
     let block = Block::default()
-        .title(" Input ")
+        .title(TITLE_INPUT)
         .borders(Borders::ALL)
         .border_style(border_style);
     let graphemes: Vec<&str> = app.input.graphemes(true).collect();
@@ -392,7 +405,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
     let popup_area = centered_rect(70, 70, area);
     let block = Block::default()
         .title(Span::styled(
-            " Help / Shortcuts ",
+            TITLE_HELP,
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -435,7 +448,7 @@ fn draw_search(f: &mut Frame, area: Rect, state: &crate::app::SearchInput) {
     let popup_area = centered_rect(60, 20, area);
     let block = Block::default()
         .title(Span::styled(
-            " Search ",
+            TITLE_SEARCH,
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -467,7 +480,7 @@ fn draw_rename(f: &mut Frame, area: Rect, state: &crate::app::RenameState) {
     let popup_area = centered_rect(60, 30, area);
     let block = Block::default()
         .title(Span::styled(
-            " Rename Session ",
+            TITLE_RENAME,
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -498,7 +511,7 @@ fn draw_confirm(f: &mut Frame, area: Rect, confirm: &crate::app::ConfirmState, a
     let popup_area = centered_rect(60, 30, area);
     let block = Block::default()
         .title(Span::styled(
-            " Confirm ",
+            TITLE_CONFIRM,
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -508,10 +521,7 @@ fn draw_confirm(f: &mut Frame, area: Rect, confirm: &crate::app::ConfirmState, a
     match confirm.action {
         crate::app::ConfirmAction::DeleteSession(idx) => {
             let name = app.sessions.get(idx).cloned().unwrap_or_default();
-            lines.push(Line::from(format!(
-                "Delete session \"{}\"? Press Y to confirm, N/Esc to cancel.",
-                name
-            )));
+            lines.push(Line::from(confirm_delete_session_message(&name)));
         }
     }
     let para = Paragraph::new(lines).block(block);
