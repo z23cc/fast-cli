@@ -14,7 +14,7 @@
 - Format code: `cargo fmt --all`.
 
 ## Coding Style & Naming Conventions
-- Use Rust 4‑space indentation and keep functions small and focused.
+- Use Rust 4-space indentation and keep functions small and focused.
 - Run `cargo fmt` before committing; CI expects rustfmt style.
 - Fix or justify all `cargo clippy` warnings; prefer `-D warnings` locally.
 - Naming: crates and modules `snake_case`; types and traits `PascalCase`; functions/vars `snake_case`; constants `UPPER_SNAKE_CASE`.

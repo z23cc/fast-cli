@@ -10,7 +10,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Role};
-use crate::strings::{build_status_line, help_lines_ascii, INPUT_HINT, PREFIX_ASSISTANT, PREFIX_USER};
+use crate::strings::{build_status_line, INPUT_HINT, PREFIX_ASSISTANT, PREFIX_USER};
 use crate::theme::THEME;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -188,7 +188,7 @@ fn draw_chat(f: &mut Frame, area: Rect, app: &mut App) {
         let (display_count, indicator): (usize, Option<String>) = if collapsed && base > preview {
             (
                 preview,
-                Some(format!("... Expand ({} more lines)", base - preview)),
+                Some(format!("â€?Expand ({} more lines)", base - preview)),
             )
         } else if !collapsed && base > threshold {
             (base, Some(format!("Collapse ({} total lines)", base)))
@@ -348,7 +348,7 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App, _input_visible_lines: u16, 
     let stick = if app.chat_scroll == 0 {
         "Bottom".to_string()
     } else {
-        format!("+{} lines", app.chat_scroll)
+        format!("â†‘{} lines", app.chat_scroll)
     };
 
     let graphemes: Vec<&str> = app.input.graphemes(true).collect();
@@ -369,6 +369,20 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App, _input_visible_lines: u16, 
         crate::app::Focus::Input => "Input",
         crate::app::Focus::Sidebar => "Sessions",
     };
+    let search_info = if let Some(q) = &app.search_query {
+        let total = app.search_hits.len();
+        if total > 0 {
+            format!("  ðŸ”Ž {}  ({}/{})", q, app.search_current + 1, total)
+        } else {
+            format!("  ðŸ”Ž {} (0/0)", q)
+        }
+    } else {
+        String::new()
+    };
+    let tips = format!(
+        "[{}][{}] L{} C{}  â€? Enter send / Shift+Enter newline  â€? PgUp/PgDn scroll  â€? Shift+PgUp/PgDn fast  â€? Ctrl+â†?â†?fine  â€? F2 sessions  â€? History â†?â†?({})  â€? Ctrl+F search / F3 next  â€? ? help{}",
+        stick, focus, line_disp, col_disp, app.history.len(), search_info
+    );
     let tips = build_status_line(
         &stick,
         focus,
@@ -399,19 +413,19 @@ fn draw_help(f: &mut Frame, area: Rect) {
         ))
         .borders(Borders::ALL);
 
-    let _lines = vec![
+    let lines = vec![
         Line::from("Basic"),
         Line::from("  Enter: Send    Shift+Enter: Newline    Esc/Ctrl-C: Quit"),
         Line::from("Input Editing"),
-        Line::from("  Left/Right: Cursor move    Backspace/Delete: Delete prev/next char"),
+        Line::from("  â†?â†? Cursor move    Backspace/Delete: Delete prev/next char"),
         Line::from("  Home/End: Line start/end    Ctrl+A/E: Line start/end"),
-        Line::from("  Ctrl+Left/Right: Word move    Ctrl+W: Delete prev word"),
+        Line::from("  Ctrl+â†?â†? Word move    Ctrl+W: Delete prev word"),
         Line::from("  Ctrl+U/K: Kill to line start/end"),
         Line::from("Chat Scrolling"),
-        Line::from("  Mouse wheel: Scroll    PgUp/PgDn: Page    Shift+PgUp/PgDn: Fast page    Ctrl+Up/Down: Fine scroll    Click indicator: Expand/collapse"),
+        Line::from("  Mouse wheel: Scroll    PgUp/PgDn: Page    Shift+PgUp/PgDn: Fast page    Ctrl+â†?â†? Fine scroll    Click indicator: Expand/collapse"),
         Line::from("  Ctrl+Home/End: Top/bottom    Stick to bottom: Auto when at bottom"),
         Line::from("Sessions & Others"),
-        Line::from("  F2: Show/hide sessions    Up/Down: Input history    Mouse click sidebar: Switch session"),
+        Line::from("  F2: Show/hide sessions    â†?â†? Input history    Mouse click sidebar: Switch session"),
         Line::from("  Sidebar focus: N new / R rename / D or Delete remove"),
         Line::from("Search"),
         Line::from("  Ctrl+F: Search    F3: Next match"),
@@ -419,11 +433,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
         Line::from("  ?: Open/close this panel    F1: Open/close this panel"),
     ];
 
-    let new_lines = help_lines_ascii()
-        .iter()
-        .map(|s| Line::from(*s))
-        .collect::<Vec<Line>>();
-    let para = Paragraph::new(new_lines)
+    let para = Paragraph::new(lines)
         .block(block)
         .wrap(Wrap { trim: false });
     f.render_widget(Clear, popup_area);
@@ -634,7 +644,7 @@ mod tests {
 
     #[test]
     fn wrap_fullwidth_chars() {
-        let s = "ABC";
+        let s = "ä½ å¥½ä½?;
         let g: Vec<&str> = s.graphemes(true).collect();
         assert_eq!(measure_total_lines(s, 4), 2);
         assert_eq!(measure_prefix_line_col(&g, 2, 4), (0, 4));
@@ -642,3 +652,4 @@ mod tests {
     }
 }
 */
+

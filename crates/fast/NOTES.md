@@ -20,8 +20,8 @@ Behavior Details
 - Exit codes: 0 success; non-0 indicates error (distinguish params/network/throttling/permissions etc.).
 
 Dependency Suggestions (bin)
-- clap、anyhow/miette、tracing-subscriber、rustyline（chat REPL）。
+- clap, anyhow/miette, tracing-subscriber, rustyline (chat REPL).
 
 MVP Output
-- fast ask (mock provider → async-openai), fast chat (streaming+cancel), config/sessions basic capabilities.
+- fast ask (mock provider -> async-openai), fast chat (streaming+cancel), config/sessions basic capabilities.
 

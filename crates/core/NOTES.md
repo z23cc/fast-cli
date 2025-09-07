@@ -24,9 +24,9 @@ Abstract Overview
 - trait ConversationStore {}
 
 Dependency Suggestions (core)
-- tokio、reqwest(+eventsource, middleware, retry)、serde/schemars/jsonschema
-- tracing/thiserror、figment 或 config、directories、keyring
-- cap-std、unicode-width、dunce/path-absolutize、backoff
+- tokio, reqwest(+eventsource, middleware, retry), serde/schemars/jsonschema
+- tracing/thiserror, figment or config, directories, keyring
+- cap-std, unicode-width, dunce/path-absolutize, backoff
 
 MVP Output
 - File storage implementation, two built-in tools (file_read/web_fetch), mock provider, OpenAI adapter skeleton.
