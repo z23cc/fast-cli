@@ -12,6 +12,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::{App, Role};
 use crate::strings::{
     build_status_line,
+    build_stick_label,
     help_lines_ascii,
     confirm_delete_session_message,
     indicator_collapse,
@@ -358,11 +359,7 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App, input_visible_lines: u16, in
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App, _input_visible_lines: u16, inner_width: u16) {
-    let stick = if app.chat_scroll == 0 {
-        "Bottom".to_string()
-    } else {
-        format!("+{} lines", app.chat_scroll)
-    };
+    let stick = build_stick_label(app.chat_scroll);
 
     let graphemes: Vec<&str> = app.input.graphemes(true).collect();
     let upto = app.input_cursor.min(graphemes.len());

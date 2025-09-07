@@ -35,6 +35,22 @@ pub fn indicator_collapse(total: usize) -> String {
     format!("Collapse ({} total lines)", total)
 }
 
+// Status bar stick label
+pub const STICK_BOTTOM: &str = "Bottom";
+
+pub fn stick_lines(n: u16) -> String {
+    // ASCII-friendly label; swap to Unicode variant if desired in future
+    format!("+{} lines", n)
+}
+
+pub fn build_stick_label(scroll: u16) -> String {
+    if scroll == 0 {
+        STICK_BOTTOM.to_string()
+    } else {
+        stick_lines(scroll)
+    }
+}
+
 // Build the status bar line with width-aware compaction.
 // - stick: e.g., "Bottom" or "^12 lines"
 // - focus: e.g., "Input" or "Sessions"
