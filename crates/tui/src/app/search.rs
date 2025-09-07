@@ -125,23 +125,8 @@ impl App {
         };
         let global = acc + hit.line_idx.min(display.saturating_sub(1));
         if let Some(area) = self.chat_area {
-            let inner_h = area.height.saturating_sub(2) as usize;
-            let mut total_effective = 0usize;
-            for (i, w) in self.chat_cache.iter().enumerate() {
-                let b = w.lines.len();
-                let c = self.collapsed.get(i).copied().unwrap_or(false);
-                let disp = if c && b > preview { preview } else { b };
-                let has_ind = if c && b > preview {
-                    true
-                } else {
-                    !c && b > threshold
-                };
-                total_effective += disp + if has_ind { 1 } else { 0 };
-            }
-            let viewport = inner_h.max(1);
-            let max_scroll = total_effective.saturating_sub(viewport) as u16;
-            let y_offset = global.min(total_effective.saturating_sub(1));
-            self.chat_scroll = max_scroll.saturating_sub(y_offset as u16).min(max_scroll);
+            let inner_h = area.height.saturating_sub(2);
+            self.set_scroll_to_show_global(inner_h, global);
         }
     }
 }

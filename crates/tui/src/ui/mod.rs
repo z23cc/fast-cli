@@ -152,19 +152,12 @@ fn draw_chat(f: &mut Frame, area: Rect, app: &mut App) {
         .border_style(Style::default().fg(THEME.chat_border));
 
     let inner_width = area.width.saturating_sub(2);
-    let inner_height = area.height.saturating_sub(2) as usize;
+    let inner_height = area.height.saturating_sub(2);
     app.ensure_chat_wrapped(inner_width);
 
-    let total_lines = app.chat_total_lines;
-    let viewport = inner_height.max(1);
+    let (viewport, _max_scroll, start_offset, _effective_total) =
+        app.compute_chat_layout(inner_height);
     app.chat_viewport = viewport as u16;
-    let max_scroll = total_lines.saturating_sub(viewport) as u16;
-    let distance_from_bottom = if app.stick_to_bottom {
-        0
-    } else {
-        app.chat_scroll.min(max_scroll)
-    };
-    let start_offset = max_scroll.saturating_sub(distance_from_bottom) as usize;
     let mut y_offset = start_offset;
 
     let mut vis_lines: Vec<Line> = Vec::new();
@@ -300,24 +293,7 @@ fn draw_chat(f: &mut Frame, area: Rect, app: &mut App) {
         width: area.width.saturating_sub(2),
         height: area.height.saturating_sub(2),
     };
-    let mut effective_total = 0usize;
-    for (idx, w) in app.chat_cache.iter().enumerate() {
-        let base = w.lines.len();
-        let collapsed = app.collapsed.get(idx).copied().unwrap_or(false);
-        let preview = app.collapse_preview_lines;
-        let threshold = app.collapse_threshold_lines;
-        let display = if collapsed && base > preview {
-            preview
-        } else {
-            base
-        };
-        let has_indicator = if collapsed && base > preview {
-            true
-        } else {
-            !collapsed && base > threshold
-        };
-        effective_total += display + if has_indicator { 1 } else { 0 };
-    }
+    let effective_total = app.effective_total_lines();
     if effective_total > inner.height as usize {
         let mut sb_state = ScrollbarState::new(effective_total).position(start_offset);
         let sb = Scrollbar::default().orientation(ScrollbarOrientation::VerticalRight);

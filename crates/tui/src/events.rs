@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, MouseButton, MouseEventKind};
 use ratatui::{backend::Backend, Terminal};
@@ -6,8 +6,14 @@ use ratatui::{backend::Backend, Terminal};
 use crate::{app::App, ui};
 
 pub fn run<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> anyhow::Result<()> {
+    let mut last_draw = Instant::now();
+    let heartbeat = Duration::from_millis(500);
     loop {
-        terminal.draw(|f| ui::draw(f, app))?;
+        if app.dirty || last_draw.elapsed() >= heartbeat {
+            terminal.draw(|f| ui::draw(f, app))?;
+            app.dirty = false;
+            last_draw = Instant::now();
+        }
         if matches!(app.focus, crate::app::Focus::Input) {
             let _ = terminal.show_cursor();
         } else {
@@ -16,8 +22,13 @@ pub fn run<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> anyhow::Res
 
         if event::poll(Duration::from_millis(120))? {
             match event::read()? {
-                Event::Key(key) => app.on_key(key),
-                Event::Paste(s) => app.insert_text(&s),
+                Event::Key(key) => {
+                    app.on_key(key);
+                }
+                Event::Paste(s) => {
+                    app.insert_text(&s);
+                    app.dirty = true;
+                }
                 Event::Resize(_, _) => {}
                 Event::Mouse(me) => {
                     if app.show_help {
@@ -33,37 +44,22 @@ pub fn run<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> anyhow::Res
                                 MouseEventKind::ScrollUp => {
                                     app.chat_scroll = app.chat_scroll.saturating_add(3);
                                     app.stick_to_bottom = false;
+                                    app.dirty = true;
                                 }
                                 MouseEventKind::ScrollDown => {
                                     app.chat_scroll = app.chat_scroll.saturating_sub(3);
                                     if app.chat_scroll == 0 {
                                         app.stick_to_bottom = true;
                                     }
+                                    app.dirty = true;
                                 }
                                 MouseEventKind::Down(MouseButton::Left) => {
                                     let inner_w = area.width.saturating_sub(2);
-                                    let inner_h = area.height.saturating_sub(2) as usize;
+                                    let inner_h = area.height.saturating_sub(2);
                                     app.ensure_chat_wrapped(inner_w);
-                                    let mut total_effective = 0usize;
-                                    for (i, w) in app.chat_cache.iter().enumerate() {
-                                        let base = w.lines.len();
-                                        let collapsed =
-                                            app.collapsed.get(i).copied().unwrap_or(false);
-                                        let preview = app.collapse_preview_lines;
-                                        let threshold = app.collapse_threshold_lines;
-                                        total_effective += if collapsed && base > preview {
-                                            preview + 1
-                                        } else if !collapsed && base > threshold {
-                                            base + 1
-                                        } else {
-                                            base
-                                        };
-                                    }
-                                    let viewport = inner_h.max(1);
-                                    let max_scroll =
-                                        total_effective.saturating_sub(viewport) as u16;
-                                    let distance = app.chat_scroll.min(max_scroll);
-                                    let y_offset = max_scroll.saturating_sub(distance) as usize;
+                                    let (_viewport, _max_scroll, start_offset, _total) =
+                                        app.compute_chat_layout(inner_h);
+                                    let y_offset = start_offset;
                                     let rel_y = (y - (area.y + 1)) as usize;
                                     let global = y_offset.saturating_add(rel_y);
 
@@ -92,6 +88,7 @@ pub fn run<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> anyhow::Res
                                         let offset_in_msg = global - acc;
                                         if has_indicator && offset_in_msg == display {
                                             app.toggle_collapse_at(i);
+                                            app.dirty = true;
                                         }
                                         break;
                                     }
@@ -116,11 +113,13 @@ pub fn run<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> anyhow::Res
                                     app.sidebar_scroll =
                                         app.sidebar_scroll.saturating_sub(1).min(max);
                                     let _ = crate::persist::save_state(app);
+                                    app.dirty = true;
                                 }
                                 MouseEventKind::ScrollDown => {
                                     let max = app.sidebar_max_scroll();
                                     app.sidebar_scroll = (app.sidebar_scroll + 1).min(max);
                                     let _ = crate::persist::save_state(app);
+                                    app.dirty = true;
                                 }
                                 MouseEventKind::Down(MouseButton::Left) => {
                                     if y > area.y && y < area.y + area.height - 1 {
@@ -131,6 +130,7 @@ pub fn run<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> anyhow::Res
                                             app.ensure_sidebar_visible();
                                             let _ = crate::persist::save_state(app);
                                             app.load_current_session_messages();
+                                            app.dirty = true;
                                         }
                                     }
                                 }

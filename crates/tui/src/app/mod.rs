@@ -92,6 +92,7 @@ pub struct App {
     pub chat_viewport: u16,
     pub input_visible_lines: u16,
     pub input_max_lines: u16,
+    pub dirty: bool,
 }
 
 impl App {
@@ -130,6 +131,7 @@ impl App {
             chat_viewport: 0,
             input_visible_lines: 1,
             input_max_lines: 6,
+            dirty: true,
         };
         if let Ok(Some(p)) = crate::persist::load_state() {
             if !p.sessions.is_empty() {
@@ -174,6 +176,7 @@ impl App {
         self.input_cursor = 0;
         self.stick_to_bottom = true;
         self.chat_scroll = 0;
+        self.dirty = true;
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
@@ -547,6 +550,8 @@ impl App {
                 }
                 _ => {}
             }
+            // Mark dirty on any handled key press path.
+            self.dirty = true;
         }
     }
 
@@ -568,6 +573,7 @@ impl App {
                 self.stick_to_bottom = true;
                 let _ = crate::persist::save_session(self.current_session_name(), &self.messages);
             }
+            self.dirty = true;
         }
     }
 }
