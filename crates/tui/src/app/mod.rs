@@ -1,0 +1,600 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::layout::Rect;
+use serde::{Deserialize, Serialize};
+use unicode_segmentation::UnicodeSegmentation;
+
+pub mod chat;
+pub mod history;
+pub mod input;
+pub mod search;
+pub mod sessions;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum Role {
+    User,
+    Assistant,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Message {
+    pub role: Role,
+    pub content: String,
+}
+
+impl Message {
+    pub fn user<S: Into<String>>(s: S) -> Self {
+        Self {
+            role: Role::User,
+            content: s.into(),
+        }
+    }
+    pub fn assistant<S: Into<String>>(s: S) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: s.into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Focus {
+    Input,
+    Sidebar,
+}
+
+pub struct RenameState {
+    pub index: usize,
+    pub buffer: String,
+    pub cursor: usize,
+}
+
+#[derive(Clone)]
+pub struct ConfirmState {
+    pub action: ConfirmAction,
+}
+
+#[derive(Clone)]
+pub enum ConfirmAction {
+    DeleteSession(usize),
+}
+
+pub struct App {
+    pub messages: Vec<Message>,
+    pub input: String,
+    pub input_cursor: usize,
+    pub history: Vec<String>,
+    pub history_index: Option<usize>,
+    pub sessions: Vec<String>,
+    pub current_session: usize,
+    pub should_quit: bool,
+    pub chat_scroll: u16,
+    tick: u64,
+    stream: Option<StreamState>,
+    pub show_sidebar: bool,
+    pub show_help: bool,
+    pub chat_area: Option<Rect>,
+    pub sidebar_area: Option<Rect>,
+    pub sidebar_scroll: u16,
+    pub focus: Focus,
+    pub rename: Option<RenameState>,
+    pub confirm: Option<ConfirmState>,
+    pub chat_wrap_width: u16,
+    pub chat_cache: Vec<WrappedMsg>,
+    pub chat_total_lines: usize,
+    pub collapsed: Vec<bool>,
+    pub collapse_preview_lines: usize,
+    pub collapse_threshold_lines: usize,
+    pub search_input: Option<SearchInput>,
+    pub search_query: Option<String>,
+    pub search_hits: Vec<SearchHit>,
+    pub search_current: usize,
+    pub stick_to_bottom: bool,
+    pub chat_viewport: u16,
+    pub input_visible_lines: u16,
+    pub input_max_lines: u16,
+}
+
+impl App {
+    pub fn new() -> Self {
+        let mut s = Self {
+            messages: vec![Message::assistant("Welcome to fast TUI (preview). Enter: send; Shift+Enter: newline; Esc/Ctrl-C: quit.")],
+            input: String::new(),
+            input_cursor: 0,
+            history: Vec::new(),
+            history_index: None,
+            sessions: vec!["default".to_string()],
+            current_session: 0,
+            should_quit: false,
+            chat_scroll: 0,
+            tick: 0,
+            stream: None,
+            show_sidebar: true,
+            show_help: false,
+            chat_area: None,
+            sidebar_area: None,
+            sidebar_scroll: 0,
+            focus: Focus::Input,
+            rename: None,
+            confirm: None,
+            chat_wrap_width: 0,
+            chat_cache: Vec::new(),
+            chat_total_lines: 0,
+            collapsed: Vec::new(),
+            collapse_preview_lines: 8,
+            collapse_threshold_lines: 40,
+            search_input: None,
+            search_query: None,
+            search_hits: Vec::new(),
+            search_current: 0,
+            stick_to_bottom: true,
+            chat_viewport: 0,
+            input_visible_lines: 1,
+            input_max_lines: 6,
+        };
+        if let Ok(Some(p)) = crate::persist::load_state() {
+            if !p.sessions.is_empty() {
+                s.sessions = p.sessions;
+            }
+            if !s.sessions.is_empty() {
+                s.current_session = p.current_session.min(s.sessions.len() - 1);
+            }
+            s.show_sidebar = p.show_sidebar;
+            s.sidebar_scroll = p.sidebar_scroll;
+        }
+        if !s.sessions.is_empty() {
+            if let Ok(msgs) = crate::persist::load_session(&s.sessions[s.current_session]) {
+                if !msgs.is_empty() {
+                    s.messages = msgs;
+                }
+            }
+        }
+        s
+    }
+
+    pub fn submit(&mut self) {
+        let text = self.input.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+
+        self.record_history_entry(&text);
+        self.messages.push(Message::user(text.clone()));
+        self.collapsed.push(false);
+
+        let assistant_index = self.messages.len();
+        self.messages.push(Message::assistant(String::new()));
+        self.collapsed.push(false);
+        let content = format!("You said: {}", text);
+        self.stream = Some(StreamState {
+            target_index: assistant_index,
+            content,
+            pos: 0,
+        });
+        self.input.clear();
+        self.input_cursor = 0;
+        self.stick_to_bottom = true;
+        self.chat_scroll = 0;
+    }
+
+    pub fn on_key(&mut self, key: KeyEvent) {
+        if let KeyEventKind::Press = key.kind {
+            if self.show_help {
+                match key.code {
+                    KeyCode::Esc | KeyCode::F(1) => {
+                        self.show_help = false;
+                    }
+                    KeyCode::Char('?') => {
+                        self.show_help = false;
+                    }
+                    _ => {}
+                }
+                return;
+            }
+
+            if let Some(state) = &mut self.search_input {
+                match key.code {
+                    KeyCode::Esc => {
+                        self.search_input = None;
+                    }
+                    KeyCode::Enter => {
+                        self.commit_search();
+                    }
+                    KeyCode::Backspace => {
+                        if state.cursor > 0 {
+                            let mut parts: Vec<&str> = state.buffer.graphemes(true).collect();
+                            let c = state.cursor.min(parts.len());
+                            parts.remove(c - 1);
+                            state.buffer = parts.concat();
+                            state.cursor -= 1;
+                        }
+                    }
+                    KeyCode::Delete => {
+                        let mut parts: Vec<&str> = state.buffer.graphemes(true).collect();
+                        let c = state.cursor.min(parts.len());
+                        if c < parts.len() {
+                            parts.remove(c);
+                            state.buffer = parts.concat();
+                        }
+                    }
+                    KeyCode::Left => {
+                        if state.cursor > 0 {
+                            state.cursor -= 1;
+                        }
+                    }
+                    KeyCode::Right => {
+                        let l = state.buffer.graphemes(true).count();
+                        if state.cursor < l {
+                            state.cursor += 1;
+                        }
+                    }
+                    KeyCode::Home => {
+                        state.cursor = 0;
+                    }
+                    KeyCode::End => {
+                        state.cursor = state.buffer.graphemes(true).count();
+                    }
+                    KeyCode::Char(ch) => {
+                        if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                            let mut parts: Vec<&str> = state.buffer.graphemes(true).collect();
+                            let c = state.cursor.min(parts.len());
+                            let mut buf = [0u8; 4];
+                            parts.insert(c, ch.encode_utf8(&mut buf));
+                            state.buffer = parts.concat();
+                            state.cursor += 1;
+                        }
+                    }
+                    _ => {}
+                }
+                return;
+            }
+
+            if let Some(state) = &mut self.rename {
+                match key.code {
+                    KeyCode::Esc => {
+                        self.rename = None;
+                    }
+                    KeyCode::Enter => {
+                        let idx = state.index.min(self.sessions.len().saturating_sub(1));
+                        if !state.buffer.trim().is_empty() {
+                            let old = self.sessions[idx].clone();
+                            let new_name = state.buffer.trim().to_string();
+                            if new_name != old {
+                                let _ = crate::persist::rename_session(&old, &new_name);
+                                self.sessions[idx] = new_name;
+                            }
+                            self.current_session = idx;
+                        }
+                        self.rename = None;
+                        let _ = crate::persist::save_state(self);
+                    }
+                    KeyCode::Backspace => {
+                        if state.cursor > 0 {
+                            let mut parts: Vec<&str> = state.buffer.graphemes(true).collect();
+                            let c = state.cursor.min(parts.len());
+                            parts.remove(c - 1);
+                            state.buffer = parts.concat();
+                            state.cursor -= 1;
+                        }
+                    }
+                    KeyCode::Delete => {
+                        let mut parts: Vec<&str> = state.buffer.graphemes(true).collect();
+                        let c = state.cursor.min(parts.len());
+                        if c < parts.len() {
+                            parts.remove(c);
+                            state.buffer = parts.concat();
+                        }
+                    }
+                    KeyCode::Left => {
+                        if state.cursor > 0 {
+                            state.cursor -= 1;
+                        }
+                    }
+                    KeyCode::Right => {
+                        let l = state.buffer.graphemes(true).count();
+                        if state.cursor < l {
+                            state.cursor += 1;
+                        }
+                    }
+                    KeyCode::Home => {
+                        state.cursor = 0;
+                    }
+                    KeyCode::End => {
+                        state.cursor = state.buffer.graphemes(true).count();
+                    }
+                    KeyCode::Char(ch) => {
+                        if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                            let mut parts: Vec<&str> = state.buffer.graphemes(true).collect();
+                            let c = state.cursor.min(parts.len());
+                            let mut buf = [0u8; 4];
+                            parts.insert(c, ch.encode_utf8(&mut buf));
+                            state.buffer = parts.concat();
+                            state.cursor += 1;
+                        }
+                    }
+                    _ => {}
+                }
+                return;
+            }
+
+            if let Some(confirm) = self.confirm.clone() {
+                match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        match confirm.action {
+                            ConfirmAction::DeleteSession(idx) => {
+                                if idx < self.sessions.len() {
+                                    let name = self.sessions.remove(idx);
+                                    let _ = crate::persist::delete_session(&name);
+                                    if self.sessions.is_empty() {
+                                        self.sessions.push("default".to_string());
+                                    }
+                                    let new_idx = idx.min(self.sessions.len() - 1);
+                                    self.current_session = new_idx;
+                                }
+                            }
+                        }
+                        self.confirm = None;
+                        let _ = crate::persist::save_state(self);
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        self.confirm = None;
+                    }
+                    _ => {}
+                }
+                return;
+            }
+
+            match key.code {
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.should_quit = true;
+                }
+                KeyCode::Esc => self.should_quit = true,
+                KeyCode::F(1) => {
+                    self.show_help = true;
+                }
+
+                KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.open_search();
+                }
+                KeyCode::F(3) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.prev_search_hit();
+                }
+                KeyCode::F(3) => {
+                    self.next_search_hit();
+                }
+                KeyCode::Tab => {
+                    self.focus = match self.focus {
+                        Focus::Input => Focus::Sidebar,
+                        Focus::Sidebar => Focus::Input,
+                    };
+                }
+
+                KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.insert_text("\n");
+                }
+                KeyCode::Enter => {
+                    if matches!(self.focus, Focus::Input) {
+                        self.submit();
+                    }
+                }
+                KeyCode::Backspace if matches!(self.focus, Focus::Input) => {
+                    self.delete_left_grapheme();
+                }
+                KeyCode::Delete if matches!(self.focus, Focus::Input) => {
+                    self.delete_right_grapheme();
+                }
+                KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.delete_prev_word();
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.kill_to_line_start();
+                }
+                KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.kill_to_line_end();
+                }
+                KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.move_cursor_line_start();
+                }
+                KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.move_cursor_line_end();
+                }
+                KeyCode::Char(ch) => {
+                    if matches!(self.focus, Focus::Sidebar) {
+                        match ch {
+                            'n' | 'N' => {
+                                self.sidebar_new_session();
+                            }
+                            'r' | 'R' => {
+                                self.sidebar_rename_current();
+                            }
+                            'd' | 'D' => {
+                                self.sidebar_delete_current();
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        let mut buf = [0u8; 4];
+                        let s = ch.encode_utf8(&mut buf);
+                        self.insert_text(s);
+                    }
+                }
+                KeyCode::Left if key.modifiers.is_empty() && matches!(self.focus, Focus::Input) => {
+                    if self.input_cursor > 0 {
+                        self.input_cursor -= 1;
+                    }
+                }
+                KeyCode::Right
+                    if key.modifiers.is_empty() && matches!(self.focus, Focus::Input) =>
+                {
+                    let len = self.input.graphemes(true).count();
+                    if self.input_cursor < len {
+                        self.input_cursor += 1;
+                    }
+                }
+                KeyCode::Left
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && matches!(self.focus, Focus::Input) =>
+                {
+                    self.move_cursor_word_left();
+                }
+                KeyCode::Right
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && matches!(self.focus, Focus::Input) =>
+                {
+                    self.move_cursor_word_right();
+                }
+                KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.chat_scroll = u16::MAX;
+                }
+                KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.chat_scroll = 0;
+                }
+                KeyCode::Up if key.modifiers.is_empty() && matches!(self.focus, Focus::Input) => {
+                    if self.history.is_empty() {
+                        return;
+                    }
+                    let idx = match self.history_index {
+                        None => self.history.len().saturating_sub(1),
+                        Some(0) => 0,
+                        Some(i) => i.saturating_sub(1),
+                    };
+                    self.history_index = Some(idx);
+                    self.input = self.history[idx].clone();
+                    self.input_cursor = self.input.graphemes(true).count();
+                }
+                KeyCode::Down if key.modifiers.is_empty() && matches!(self.focus, Focus::Input) => {
+                    if let Some(i) = self.history_index {
+                        if i + 1 < self.history.len() {
+                            self.history_index = Some(i + 1);
+                            self.input = self.history[i + 1].clone();
+                            self.input_cursor = self.input.graphemes(true).count();
+                        } else {
+                            self.history_index = None;
+                            self.input.clear();
+                            self.input_cursor = 0;
+                        }
+                    }
+                }
+                KeyCode::Up if matches!(self.focus, Focus::Sidebar) => {
+                    self.sidebar_select_up();
+                }
+                KeyCode::Down if matches!(self.focus, Focus::Sidebar) => {
+                    self.sidebar_select_down();
+                }
+                KeyCode::PageUp if matches!(self.focus, Focus::Sidebar) => {
+                    let step = self.sidebar_inner_height().max(1);
+                    for _ in 0..step {
+                        self.sidebar_select_up();
+                    }
+                }
+                KeyCode::PageDown if matches!(self.focus, Focus::Sidebar) => {
+                    let step = self.sidebar_inner_height().max(1);
+                    for _ in 0..step {
+                        self.sidebar_select_down();
+                    }
+                }
+                KeyCode::Home if matches!(self.focus, Focus::Sidebar) => {
+                    self.current_session = 0;
+                    self.ensure_sidebar_visible();
+                    let _ = crate::persist::save_state(self);
+                }
+                KeyCode::End if matches!(self.focus, Focus::Sidebar) => {
+                    if !self.sessions.is_empty() {
+                        self.current_session = self.sessions.len() - 1;
+                    }
+                    self.ensure_sidebar_visible();
+                    let _ = crate::persist::save_state(self);
+                }
+                KeyCode::PageUp if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    let step = self.chat_viewport.saturating_mul(2).max(1);
+                    self.chat_scroll = self.chat_scroll.saturating_add(step);
+                    self.stick_to_bottom = false;
+                }
+                KeyCode::PageDown if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    let step = self.chat_viewport.saturating_mul(2).max(1);
+                    self.chat_scroll = self.chat_scroll.saturating_sub(step);
+                    if self.chat_scroll == 0 {
+                        self.stick_to_bottom = true;
+                    }
+                }
+                KeyCode::PageUp => {
+                    let step = self.chat_viewport.max(1);
+                    self.chat_scroll = self.chat_scroll.saturating_add(step);
+                    self.stick_to_bottom = false;
+                }
+                KeyCode::PageDown => {
+                    let step = self.chat_viewport.max(1);
+                    self.chat_scroll = self.chat_scroll.saturating_sub(step);
+                    if self.chat_scroll == 0 {
+                        self.stick_to_bottom = true;
+                    }
+                }
+                KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.chat_scroll = self.chat_scroll.saturating_add(1);
+                    self.stick_to_bottom = false;
+                }
+                KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.chat_scroll = self.chat_scroll.saturating_sub(1);
+                    if self.chat_scroll == 0 {
+                        self.stick_to_bottom = true;
+                    }
+                }
+                KeyCode::F(2) => {
+                    self.show_sidebar = !self.show_sidebar;
+                    let _ = crate::persist::save_state(self);
+                }
+                KeyCode::Delete if matches!(self.focus, Focus::Sidebar) => {
+                    self.sidebar_delete_current();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub fn on_tick(&mut self) {
+        self.tick = self.tick.wrapping_add(1);
+        if let Some(stream) = &mut self.stream {
+            let graphemes: Vec<&str> =
+                UnicodeSegmentation::graphemes(stream.content.as_str(), true).collect();
+            if stream.pos < graphemes.len() {
+                let end = (stream.pos + 2).min(graphemes.len());
+                let slice = graphemes[stream.pos..end].join("");
+                stream.pos = end;
+                if let Some(msg) = self.messages.get_mut(stream.target_index) {
+                    msg.content.push_str(&slice);
+                }
+            }
+            if stream.pos >= graphemes.len() {
+                self.stream = None;
+                self.stick_to_bottom = true;
+                let _ = crate::persist::save_session(self.current_session_name(), &self.messages);
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct SearchInput {
+    pub buffer: String,
+    pub cursor: usize,
+}
+
+#[derive(Clone)]
+pub struct SearchHit {
+    pub msg_idx: usize,
+    pub line_idx: usize,
+    pub start: usize,
+    pub end: usize,
+}
+
+struct StreamState {
+    target_index: usize,
+    content: String,
+    pos: usize,
+}
+
+#[derive(Clone)]
+pub struct WrappedMsg {
+    pub role: Role,
+    pub content_len: usize,
+    pub lines: Vec<String>,
+}
