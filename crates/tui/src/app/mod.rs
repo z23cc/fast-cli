@@ -1,9 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use fast_core::llm::ModelClient as _;
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
+use tracing::{error, info};
 use unicode_segmentation::UnicodeSegmentation;
-use fast_core::llm::ModelClient as _;
-use tracing::{info, error};
 
 pub mod chat;
 pub mod history;
@@ -103,6 +103,7 @@ pub struct App {
     pub context_scroll: u16,
     pub context_current: usize,
     pub palette: Option<PaletteState>,
+    pub model_picker: Option<ModelPickerState>,
     pub llm_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     // Provider/model info for status bar
     pub provider_label: String,
@@ -111,6 +112,50 @@ pub struct App {
 }
 
 impl App {
+    // Returns true if a supported slash command was handled
+    fn try_handle_slash_command(&mut self, text: &str) -> bool {
+        let s = text.trim();
+        if !s.starts_with('/') {
+            return false;
+        }
+        // Very small parser: /model <name> | /wire <responses|chat|auto>
+        let rest = &s[1..];
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let cmd = parts.next().unwrap_or("").to_lowercase();
+        let arg = parts.next().unwrap_or("").trim();
+        match cmd.as_str() {
+            "model" => {
+                if arg.is_empty() {
+                    self.open_model_picker();
+                    self.dirty = true;
+                    return true;
+                }
+                self.model_label = arg.to_string();
+                let _ = crate::persist::save_state(self);
+                // Show an inline info line to the user
+                self.messages.push(Message::assistant(format!(
+                    "[info] model set to '{}'",
+                    self.model_label
+                )));
+                self.collapsed.push(false);
+                true
+            }
+            "wire" => {
+                let v = arg.to_lowercase();
+                if matches!(v.as_str(), "responses" | "chat" | "auto") {
+                    self.wire_label = v;
+                    let _ = crate::persist::save_state(self);
+                    self.messages.push(Message::assistant(format!(
+                        "[info] wire set to '{}'",
+                        self.wire_label
+                    )));
+                    self.collapsed.push(false);
+                }
+                true
+            }
+            _ => true, // Unknown slash cmd: consume it quietly
+        }
+    }
     pub fn new() -> Self {
         let mut s = Self {
             messages: vec![Message::assistant("Welcome to fast TUI (preview). Enter: send; Shift+Enter: newline; Esc/Ctrl-C: quit.")],
@@ -153,6 +198,7 @@ impl App {
             context_scroll: 0,
             context_current: 0,
             palette: None,
+            model_picker: None,
             llm_rx: None,
             provider_label: String::from("OpenAI"),
             model_label: String::from("gpt-5"),
@@ -172,6 +218,12 @@ impl App {
             }
             s.show_sidebar = p.show_sidebar;
             s.sidebar_scroll = p.sidebar_scroll;
+            if let Some(m) = p.model {
+                s.model_label = m;
+            }
+            if let Some(w) = p.wire_api {
+                s.wire_label = w;
+            }
         }
         if !s.sessions.is_empty() {
             if let Ok(msgs) = crate::persist::load_session(&s.sessions[s.current_session]) {
@@ -186,6 +238,14 @@ impl App {
     pub fn submit(&mut self) {
         let text = self.input.trim().to_string();
         if text.is_empty() {
+            return;
+        }
+
+        // Slash commands (e.g., /model <name>, /wire <responses|chat|auto>)
+        if self.try_handle_slash_command(&text) {
+            self.input.clear();
+            self.input_cursor = 0;
+            self.dirty = true;
             return;
         }
 
@@ -207,8 +267,7 @@ impl App {
             .iter()
             .position(|m| matches!(m.role, Role::User))
             .unwrap_or(0);
-        let msgs_snapshot = self
-            .messages[first_user_idx..]
+        let msgs_snapshot = self.messages[first_user_idx..]
             .iter()
             .filter(|m| !(matches!(m.role, Role::Assistant) && m.content.trim().is_empty()))
             .map(|m| fast_core::llm::Message {
@@ -221,33 +280,63 @@ impl App {
             .collect::<Vec<_>>();
         // Log submit intent (model/wire)
         info!(target: "tui", "submit: model={} wire={} input_len={} chars", self.model_label, self.wire_label, text.len());
+        // Capture runtime selections for this request
+        let selected_model = self.model_label.clone();
+        let selected_wire = self.wire_label.clone();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("rt");
             let _ = rt.block_on(async move {
                 let cfg = match providers::openai::config::OpenAiConfig::from_env_and_file() {
                     Ok(c) => c,
-                    Err(e) => { let _ = tx.send(Err(format!("config: {}", e))); error!(target: "tui", "submit config error: {}", e); return; }
+                    Err(e) => {
+                        let _ = tx.send(Err(format!("config: {}", e)));
+                        error!(target: "tui", "submit config error: {}", e);
+                        return;
+                    }
                 };
                 let client = match providers::openai::OpenAiClient::new(cfg.clone()) {
                     Ok(c) => c,
-                    Err(e) => { let _ = tx.send(Err(format!("client: {}", e))); error!(target: "tui", "submit client build error: {}", e); return; }
+                    Err(e) => {
+                        let _ = tx.send(Err(format!("client: {}", e)));
+                        error!(target: "tui", "submit client build error: {}", e);
+                        return;
+                    }
                 };
-                let opts = fast_core::llm::ChatOpts { model: cfg.model.clone(), temperature: None, top_p: None, max_tokens: None };
-                let wire = match cfg.wire_api.as_str() { "chat"=>fast_core::llm::ChatWire::Chat, "responses"=>fast_core::llm::ChatWire::Responses, _=>fast_core::llm::ChatWire::Responses };
+                let opts = fast_core::llm::ChatOpts {
+                    model: selected_model.clone(),
+                    temperature: None,
+                    top_p: None,
+                    max_tokens: None,
+                };
+                let wire = match selected_wire.as_str() {
+                    "chat" => fast_core::llm::ChatWire::Chat,
+                    "responses" => fast_core::llm::ChatWire::Responses,
+                    "auto" => fast_core::llm::ChatWire::Auto,
+                    _ => fast_core::llm::ChatWire::Responses,
+                };
                 let res = client.stream_chat(msgs_snapshot, opts, wire).await;
                 match res {
                     Ok(mut s) => {
                         use futures::StreamExt;
                         while let Some(it) = s.next().await {
                             match it {
-                                Ok(fast_core::llm::ChatDelta::Text(t)) => { let _ = tx.send(Ok(t)); }
+                                Ok(fast_core::llm::ChatDelta::Text(t)) => {
+                                    let _ = tx.send(Ok(t));
+                                }
                                 Ok(fast_core::llm::ChatDelta::Finish(_)) => break,
                                 Ok(_) => {}
-                                Err(e) => { let _ = tx.send(Err(format!("{}", e))); error!(target: "tui", "stream delta error: {}", e); break; }
+                                Err(e) => {
+                                    let _ = tx.send(Err(format!("{}", e)));
+                                    error!(target: "tui", "stream delta error: {}", e);
+                                    break;
+                                }
                             }
                         }
                     }
-                    Err(e) => { let _ = tx.send(Err(format!("{}", e))); error!(target: "tui", "stream start error: {}", e); }
+                    Err(e) => {
+                        let _ = tx.send(Err(format!("{}", e)));
+                        error!(target: "tui", "stream start error: {}", e);
+                    }
                 }
             });
         });
@@ -262,15 +351,25 @@ impl App {
         if let KeyEventKind::Press = key.kind {
             if let Some(p) = &mut self.palette {
                 match key.code {
-                    KeyCode::Esc => { self.palette = None; }
+                    KeyCode::Esc => {
+                        self.palette = None;
+                    }
                     KeyCode::Enter => {
                         if let Some(act) = p.filtered.get(p.selected).cloned() {
                             self.execute_palette_action(&act);
                             self.palette = None;
                         }
                     }
-                    KeyCode::Up => { if p.selected > 0 { p.selected -= 1; } }
-                    KeyCode::Down => { if p.selected + 1 < p.filtered.len() { p.selected += 1; } }
+                    KeyCode::Up => {
+                        if p.selected > 0 {
+                            p.selected -= 1;
+                        }
+                    }
+                    KeyCode::Down => {
+                        if p.selected + 1 < p.filtered.len() {
+                            p.selected += 1;
+                        }
+                    }
                     KeyCode::Backspace => {
                         if p.cursor > 0 {
                             let mut parts: Vec<&str> = p.buffer.graphemes(true).collect();
@@ -284,12 +383,29 @@ impl App {
                     KeyCode::Delete => {
                         let mut parts: Vec<&str> = p.buffer.graphemes(true).collect();
                         let c = p.cursor.min(parts.len());
-                        if c < parts.len() { parts.remove(c); p.buffer = parts.concat(); App::palette_filter(p); }
+                        if c < parts.len() {
+                            parts.remove(c);
+                            p.buffer = parts.concat();
+                            App::palette_filter(p);
+                        }
                     }
-                    KeyCode::Left => { if p.cursor > 0 { p.cursor -= 1; } }
-                    KeyCode::Right => { let l = p.buffer.graphemes(true).count(); if p.cursor < l { p.cursor += 1; } }
-                    KeyCode::Home => { p.cursor = 0; }
-                    KeyCode::End => { p.cursor = p.buffer.graphemes(true).count(); }
+                    KeyCode::Left => {
+                        if p.cursor > 0 {
+                            p.cursor -= 1;
+                        }
+                    }
+                    KeyCode::Right => {
+                        let l = p.buffer.graphemes(true).count();
+                        if p.cursor < l {
+                            p.cursor += 1;
+                        }
+                    }
+                    KeyCode::Home => {
+                        p.cursor = 0;
+                    }
+                    KeyCode::End => {
+                        p.cursor = p.buffer.graphemes(true).count();
+                    }
                     KeyCode::Char(ch) => {
                         if !key.modifiers.contains(KeyModifiers::CONTROL) {
                             let mut parts: Vec<&str> = p.buffer.graphemes(true).collect();
@@ -299,6 +415,90 @@ impl App {
                             p.buffer = parts.concat();
                             p.cursor += 1;
                             App::palette_filter(p);
+                        }
+                    }
+                    _ => {}
+                }
+                return;
+            }
+
+            if self.model_picker.is_some() {
+                let model_all = self.recommended_models();
+                let st = match &mut self.model_picker {
+                    Some(s) => s,
+                    None => unreachable!(),
+                };
+                match key.code {
+                    KeyCode::Esc => {
+                        self.model_picker = None;
+                    }
+                    KeyCode::Enter => {
+                        if let Some(sel) = st.filtered.get(st.selected).cloned() {
+                            self.model_label = sel;
+                            self.model_picker = None;
+                            let _ = crate::persist::save_state(self);
+                            self.messages.push(Message::assistant(format!(
+                                "[info] model set to '{}'",
+                                self.model_label
+                            )));
+                            self.collapsed.push(false);
+                        }
+                    }
+                    KeyCode::Up => {
+                        if st.selected > 0 {
+                            st.selected -= 1;
+                        }
+                    }
+                    KeyCode::Down => {
+                        if st.selected + 1 < st.filtered.len() {
+                            st.selected += 1;
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        if st.cursor > 0 {
+                            let mut parts: Vec<&str> = st.buffer.graphemes(true).collect();
+                            let c = st.cursor.min(parts.len());
+                            parts.remove(c - 1);
+                            st.buffer = parts.concat();
+                            st.cursor -= 1;
+                            App::model_filter(&model_all, st);
+                        }
+                    }
+                    KeyCode::Delete => {
+                        let mut parts: Vec<&str> = st.buffer.graphemes(true).collect();
+                        let c = st.cursor.min(parts.len());
+                        if c < parts.len() {
+                            parts.remove(c);
+                            st.buffer = parts.concat();
+                            App::model_filter(&model_all, st);
+                        }
+                    }
+                    KeyCode::Left => {
+                        if st.cursor > 0 {
+                            st.cursor -= 1;
+                        }
+                    }
+                    KeyCode::Right => {
+                        let l = st.buffer.graphemes(true).count();
+                        if st.cursor < l {
+                            st.cursor += 1;
+                        }
+                    }
+                    KeyCode::Home => {
+                        st.cursor = 0;
+                    }
+                    KeyCode::End => {
+                        st.cursor = st.buffer.graphemes(true).count();
+                    }
+                    KeyCode::Char(ch) => {
+                        if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                            let mut parts: Vec<&str> = st.buffer.graphemes(true).collect();
+                            let c = st.cursor.min(parts.len());
+                            let mut buf = [0u8; 4];
+                            parts.insert(c, ch.encode_utf8(&mut buf));
+                            st.buffer = parts.concat();
+                            st.cursor += 1;
+                            App::model_filter(&model_all, st);
                         }
                     }
                     _ => {}
@@ -496,8 +696,12 @@ impl App {
                     // Cycle focus across visible panes: Input -> Sidebar? -> Context? -> Input
                     let mut order = Vec::new();
                     order.push(Focus::Input);
-                    if self.show_sidebar { order.push(Focus::Sidebar); }
-                    if self.show_context { order.push(Focus::Context); }
+                    if self.show_sidebar {
+                        order.push(Focus::Sidebar);
+                    }
+                    if self.show_context {
+                        order.push(Focus::Context);
+                    }
                     // find next
                     if let Some(pos) = order.iter().position(|f| *f == self.focus) {
                         let next = (pos + 1) % order.len();
@@ -541,7 +745,9 @@ impl App {
                 KeyCode::Char(ch) => {
                     if matches!(self.focus, Focus::Context) {
                         match ch {
-                            'a' | 'A' => { self.open_context_add(); }
+                            'a' | 'A' => {
+                                self.open_context_add();
+                            }
                             _ => {}
                         }
                     } else if matches!(self.focus, Focus::Sidebar) {
@@ -697,15 +903,21 @@ impl App {
                 }
                 // Context pane shortcuts
                 KeyCode::Up if matches!(self.focus, Focus::Context) => {
-                    if self.context_current > 0 { self.context_current -= 1; }
+                    if self.context_current > 0 {
+                        self.context_current -= 1;
+                    }
                 }
                 KeyCode::Down if matches!(self.focus, Focus::Context) => {
-                    if self.context_current + 1 < self.context_items.len() { self.context_current += 1; }
+                    if self.context_current + 1 < self.context_items.len() {
+                        self.context_current += 1;
+                    }
                 }
                 KeyCode::Delete if matches!(self.focus, Focus::Context) => {
                     if self.context_current < self.context_items.len() {
                         self.context_items.remove(self.context_current);
-                        if self.context_current >= self.context_items.len() && !self.context_items.is_empty() {
+                        if self.context_current >= self.context_items.len()
+                            && !self.context_items.is_empty()
+                        {
                             self.context_current = self.context_items.len() - 1;
                         }
                     }
@@ -742,17 +954,26 @@ impl App {
             for _ in 0..64 {
                 match rx.try_recv() {
                     Ok(Ok(s)) => {
-                        if let Some(msg) = self.messages.last_mut() { msg.content.push_str(&s); }
+                        if let Some(msg) = self.messages.last_mut() {
+                            msg.content.push_str(&s);
+                        }
                         self.dirty = true;
                         self.stick_to_bottom = true;
                     }
                     Ok(Err(e)) => {
-                        if let Some(msg) = self.messages.last_mut() { msg.content.push_str(&format!("\n[error] {}", e)); }
+                        if let Some(msg) = self.messages.last_mut() {
+                            msg.content.push_str(&format!("\n[error] {}", e));
+                        }
                         self.llm_rx = None;
                         break;
                     }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => { break; }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => { self.llm_rx = None; break; }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.llm_rx = None;
+                        break;
+                    }
                 }
             }
         }
@@ -814,7 +1035,12 @@ impl PaletteAction {
 
 impl App {
     pub fn open_palette(&mut self) {
-        let mut st = PaletteState { buffer: String::new(), cursor: 0, filtered: Vec::new(), selected: 0 };
+        let mut st = PaletteState {
+            buffer: String::new(),
+            cursor: 0,
+            filtered: Vec::new(),
+            selected: 0,
+        };
         self.refresh_palette_filtered(&mut st);
         self.palette = Some(st);
     }
@@ -842,20 +1068,38 @@ impl App {
 
     fn execute_palette_action(&mut self, act: &PaletteAction) {
         match act {
-            PaletteAction::ToggleSidebar => { self.show_sidebar = !self.show_sidebar; let _ = crate::persist::save_state(self); }
-            PaletteAction::ToggleContext => { self.show_context = !self.show_context; }
-            PaletteAction::NewSession => { self.sidebar_new_session(); }
-            PaletteAction::RenameSession => { self.sidebar_rename_current(); }
-            PaletteAction::DeleteSession => { self.sidebar_delete_current(); }
-            PaletteAction::OpenSearch => { self.open_search(); }
-            PaletteAction::Quit => { self.should_quit = true; }
+            PaletteAction::ToggleSidebar => {
+                self.show_sidebar = !self.show_sidebar;
+                let _ = crate::persist::save_state(self);
+            }
+            PaletteAction::ToggleContext => {
+                self.show_context = !self.show_context;
+            }
+            PaletteAction::NewSession => {
+                self.sidebar_new_session();
+            }
+            PaletteAction::RenameSession => {
+                self.sidebar_rename_current();
+            }
+            PaletteAction::DeleteSession => {
+                self.sidebar_delete_current();
+            }
+            PaletteAction::OpenSearch => {
+                self.open_search();
+            }
+            PaletteAction::Quit => {
+                self.should_quit = true;
+            }
         }
         self.dirty = true;
     }
 
     pub fn open_context_add(&mut self) {
         // Reuse search input as simple line editor for context entry (e.g., file path or note)
-        self.search_input = Some(SearchInput { buffer: String::new(), cursor: 0 });
+        self.search_input = Some(SearchInput {
+            buffer: String::new(),
+            cursor: 0,
+        });
     }
 }
 
@@ -887,4 +1131,65 @@ pub struct WrappedMsg {
     pub role: Role,
     pub content_len: usize,
     pub lines: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct ModelPickerState {
+    pub buffer: String,
+    pub cursor: usize,
+    pub filtered: Vec<String>,
+    pub selected: usize,
+}
+
+impl App {
+    fn open_model_picker(&mut self) {
+        let filtered = self.recommended_models();
+        self.model_picker = Some(ModelPickerState {
+            buffer: String::new(),
+            cursor: 0,
+            filtered,
+            selected: 0,
+        });
+    }
+
+    fn recommended_models(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if !self.model_label.trim().is_empty() {
+            out.push(self.model_label.clone());
+        }
+        for m in [
+            // Codex presets for GPT-5 family
+            "gpt-5",
+            "gpt-5-high",
+            "gpt-5-medium",
+            "gpt-5-low",
+            "gpt-5-minimal",
+            // Other common models
+            "gpt-4o",
+            "gpt-4o-mini",
+            "o3",
+            "o3-mini",
+        ]
+        .iter()
+        {
+            if out.iter().all(|x| x != m) {
+                out.push((*m).to_string());
+            }
+        }
+        out
+    }
+
+    fn model_filter(all: &[String], st: &mut ModelPickerState) {
+        let q = st.buffer.to_lowercase();
+        if q.is_empty() {
+            st.filtered = all.to_vec();
+        } else {
+            st.filtered = all
+                .iter()
+                .filter(|m| m.to_lowercase().contains(&q))
+                .cloned()
+                .collect();
+        }
+        st.selected = st.selected.min(st.filtered.len().saturating_sub(1));
+    }
 }

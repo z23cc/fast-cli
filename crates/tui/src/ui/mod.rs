@@ -11,22 +11,9 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Role};
 use crate::strings::{
-    build_status_line,
-    build_stick_label,
-    help_lines_ascii,
-    confirm_delete_session_message,
-    indicator_collapse,
-    indicator_expand,
-    INPUT_HINT,
-    PREFIX_ASSISTANT,
-    PREFIX_USER,
-    TITLE_CHAT,
-    TITLE_CONFIRM,
-    TITLE_HELP,
-    TITLE_CONTEXT,
-    TITLE_INPUT,
-    TITLE_RENAME,
-    TITLE_SEARCH,
+    build_status_line, build_stick_label, confirm_delete_session_message, help_lines_ascii,
+    indicator_collapse, indicator_expand, INPUT_HINT, PREFIX_ASSISTANT, PREFIX_USER, TITLE_CHAT,
+    TITLE_CONFIRM, TITLE_CONTEXT, TITLE_HELP, TITLE_INPUT, TITLE_RENAME, TITLE_SEARCH,
     TITLE_SESSIONS,
 };
 use crate::theme::THEME;
@@ -34,9 +21,13 @@ use crate::theme::THEME;
 pub fn draw(f: &mut Frame, app: &mut App) {
     // Layout: optional left sidebar (26), main, optional right context (28)
     let mut constraints: Vec<Constraint> = Vec::new();
-    if app.show_sidebar { constraints.push(Constraint::Length(26)); }
+    if app.show_sidebar {
+        constraints.push(Constraint::Length(26));
+    }
     constraints.push(Constraint::Min(10));
-    if app.show_context { constraints.push(Constraint::Length(28)); }
+    if app.show_context {
+        constraints.push(Constraint::Length(28));
+    }
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints(constraints)
@@ -73,6 +64,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     if let Some(state) = &app.palette {
         draw_palette(f, f.area(), state);
+    }
+    if let Some(state) = &app.model_picker {
+        draw_model_picker(f, f.area(), state);
     }
     if app.show_help {
         draw_help(f, f.area());
@@ -188,11 +182,20 @@ fn draw_context(f: &mut Frame, area: Rect, app: &mut App) {
     } else {
         Style::default().fg(THEME.border_inactive)
     };
-    let block = Block::default().title(TITLE_CONTEXT).borders(Borders::ALL).border_style(border_style);
+    let block = Block::default()
+        .title(TITLE_CONTEXT)
+        .borders(Borders::ALL)
+        .border_style(border_style);
     let inner_h = area.height.saturating_sub(2) as usize;
     let start = app.context_scroll as usize;
     let mut lines: Vec<Line> = Vec::new();
-    for (i, s) in app.context_items.iter().enumerate().skip(start).take(inner_h) {
+    for (i, s) in app
+        .context_items
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(inner_h)
+    {
         let prefix = if i == app.context_current { "> " } else { "  " };
         let style = if i == app.context_current {
             if focused {
@@ -201,18 +204,27 @@ fn draw_context(f: &mut Frame, area: Rect, app: &mut App) {
                     .bg(THEME.sidebar_selected_bg)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(THEME.border_focus).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(THEME.border_focus)
+                    .add_modifier(Modifier::BOLD)
             }
         } else {
             Style::default()
         };
         lines.push(Line::from(Span::styled(format!("{}{}", prefix, s), style)));
     }
-    if start >= app.context_items.len() { lines.clear(); }
+    if start >= app.context_items.len() {
+        lines.clear();
+    }
     let para = Paragraph::new(lines).block(block);
     f.render_widget(para, area);
 
-    let inner = Rect { x: area.x.saturating_add(1), y: area.y.saturating_add(1), width: area.width.saturating_sub(2), height: area.height.saturating_sub(2) };
+    let inner = Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
     let total = app.context_items.len();
     let viewport = inner.height as usize;
     if total > viewport {
@@ -509,7 +521,9 @@ fn draw_palette(f: &mut Frame, area: Rect, state: &crate::app::PaletteState) {
     let block = Block::default()
         .title(Span::styled(
             " Command Palette ",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL);
 
@@ -528,20 +542,60 @@ fn draw_palette(f: &mut Frame, area: Rect, state: &crate::app::PaletteState) {
         };
         lines.push(Line::from(Span::styled(act.label().to_string(), style)));
     }
-    let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    let para = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
     f.render_widget(Clear, popup_area);
     f.render_widget(para, popup_area);
     // place cursor after prompt
-    let cursor_x = popup_area.x + 3 + UnicodeWidthStr::width(
-        state
-            .buffer
-            .graphemes(true)
-            .take(state.cursor)
-            .collect::<String>()
-            .as_str(),
-    ) as u16;
+    let cursor_x = popup_area.x
+        + 3
+        + UnicodeWidthStr::width(
+            state
+                .buffer
+                .graphemes(true)
+                .take(state.cursor)
+                .collect::<String>()
+                .as_str(),
+        ) as u16;
     let cursor_y = popup_area.y + 1;
     f.set_cursor_position(Position::new(cursor_x, cursor_y));
+}
+
+fn draw_model_picker(f: &mut Frame, area: Rect, state: &crate::app::ModelPickerState) {
+    use unicode_width::UnicodeWidthStr;
+    let popup_area = centered_rect(60, 60, area);
+    let block = Block::default()
+        .title(Span::styled(
+            " Select Model ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL);
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(format!(">> {}", state.buffer)));
+    let max_list = popup_area.height.saturating_sub(4) as usize;
+    for (i, m) in state.filtered.iter().take(max_list).enumerate() {
+        let sel = i == state.selected;
+        let style = if sel {
+            Style::default()
+                .fg(THEME.sidebar_selected_fg)
+                .bg(THEME.sidebar_selected_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{} {}", if sel { ">" } else { " " }, m),
+            style,
+        )));
+    }
+
+    let para = Paragraph::new(lines).block(block);
+    f.render_widget(Clear, popup_area);
+    f.render_widget(para, popup_area);
 }
 
 fn draw_search(f: &mut Frame, area: Rect, state: &crate::app::SearchInput) {
@@ -753,4 +807,3 @@ mod tests {
     }
 }
 */
-

@@ -1,12 +1,14 @@
 use crate::openai::config::OpenAiConfig;
-use fast_core::llm::{self, ChatDelta, ChatError, ChatOpts, ChatResult, ChatWire, Message, ModelClient, Role};
-use tracing::{info,debug,warn,error};
+use bytes::Buf;
+use fast_core::llm::{
+    self, ChatDelta, ChatError, ChatOpts, ChatResult, ChatWire, Message, ModelClient, Role,
+};
 use futures::{Stream, StreamExt};
 use reqwest::{header, Client, StatusCode};
 use std::result::Result as StdResult;
-use bytes::Buf;
 use std::{pin::Pin, time::Instant};
 use tokio::time::{sleep, Duration};
+use tracing::{debug, error, info, warn};
 
 #[derive(Clone)]
 pub struct OpenAiClient {
@@ -15,6 +17,17 @@ pub struct OpenAiClient {
 }
 
 impl OpenAiClient {
+    fn normalize_gpt5(model: &str) -> (String, Option<&'static str>) {
+        // Map Codex-style presets to base model + verbosity for Responses API
+        let m = model.trim();
+        match m {
+            "gpt-5-high" => ("gpt-5".to_string(), Some("high")),
+            "gpt-5-medium" => ("gpt-5".to_string(), Some("medium")),
+            "gpt-5-low" => ("gpt-5".to_string(), Some("low")),
+            "gpt-5-minimal" => ("gpt-5".to_string(), Some("minimal")),
+            _ => (m.to_string(), None),
+        }
+    }
     pub fn new(cfg: OpenAiConfig) -> anyhow::Result<Self> {
         let mut headers = header::HeaderMap::new();
         headers.insert(
@@ -51,7 +64,10 @@ impl OpenAiClient {
 #[allow(async_fn_in_trait)]
 impl ModelClient for OpenAiClient {
     async fn send_chat(&self, msgs: &[Message], opts: &ChatOpts) -> Result<ChatResult, ChatError> {
-        let url = format!("{}/chat/completions", self.cfg.base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/chat/completions",
+            self.cfg.base_url.trim_end_matches('/')
+        );
         let body = serde_json::json!({
             "model": opts.model,
             "messages": self.map_messages(msgs),
@@ -60,13 +76,30 @@ impl ModelClient for OpenAiClient {
             "top_p": opts.top_p,
             "max_tokens": opts.max_tokens,
         });
-        let resp = self.http.post(url).json(&body).send().await.map_err(map_reqwest_err)?;
+        let resp = self
+            .http
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
         if !resp.status().is_success() {
             return Err(map_status_err(resp.status(), resp.text().await.ok()));
         }
-        let v: serde_json::Value = resp.json().await.map_err(|e| ChatError::Decode(e.to_string()))?;
-        let text = v["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
-        Ok(ChatResult { text, finish_reason: None, prompt_tokens: None, completion_tokens: None })
+        let v: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| ChatError::Decode(e.to_string()))?;
+        let text = v["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        Ok(ChatResult {
+            text,
+            finish_reason: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+        })
     }
 
     async fn stream_chat<'a>(
@@ -96,8 +129,12 @@ impl OpenAiClient {
     ) -> Result<fast_core::llm::ChatStream<'a>, ChatError> {
         match self.stream_responses(msgs.clone(), opts.clone()).await {
             Ok(s) => Ok(s),
-            Err(ChatError::Protocol(e)) if e.contains("404") => self.stream_chat_completions(msgs, opts).await,
-            Err(ChatError::Other(e)) if e.contains("404") => self.stream_chat_completions(msgs, opts).await,
+            Err(ChatError::Protocol(e)) if e.contains("404") => {
+                self.stream_chat_completions(msgs, opts).await
+            }
+            Err(ChatError::Other(e)) if e.contains("404") => {
+                self.stream_chat_completions(msgs, opts).await
+            }
             Err(e) => Err(e),
         }
     }
@@ -107,10 +144,14 @@ impl OpenAiClient {
         msgs: Vec<Message>,
         opts: ChatOpts,
     ) -> Result<fast_core::llm::ChatStream<'a>, ChatError> {
-        let url = format!("{}/chat/completions", self.cfg.base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/chat/completions",
+            self.cfg.base_url.trim_end_matches('/')
+        );
         info!(target:"providers::openai","start chat stream model={} url={}", opts.model, url);
+        let (model_slug, _verbosity) = Self::normalize_gpt5(&opts.model);
         let body = serde_json::json!({
-            "model": opts.model,
+            "model": model_slug,
             "messages": self.map_messages(&msgs),
             "stream": true,
             "temperature": opts.temperature,
@@ -206,6 +247,7 @@ impl OpenAiClient {
     ) -> Result<llm::ChatStream<'a>, ChatError> {
         let url = format!("{}/responses", self.cfg.base_url.trim_end_matches('/'));
         info!(target:"providers::openai","start responses stream model={} url={}", opts.model, url);
+        let (model_slug, verbosity) = Self::normalize_gpt5(&opts.model);
         // Responses API expects input to be a list of role/content items.
         // Map our chat history into the required shape.
         let input_items: Vec<serde_json::Value> = msgs
@@ -213,7 +255,9 @@ impl OpenAiClient {
             .filter_map(|m| {
                 // Skip placeholder assistant messages with empty content
                 let is_assistant = matches!(m.role, Role::Assistant);
-                if is_assistant && m.content.trim().is_empty() { return None; }
+                if is_assistant && m.content.trim().is_empty() {
+                    return None;
+                }
 
                 let role = match m.role {
                     Role::System => "system",
@@ -222,7 +266,7 @@ impl OpenAiClient {
                 };
                 let content_type = match m.role {
                     Role::Assistant => "output_text", // prior model outputs
-                    _ => "input_text", // user/system instructions
+                    _ => "input_text",                // user/system instructions
                 };
                 Some(serde_json::json!({
                     "role": role,
@@ -230,11 +274,16 @@ impl OpenAiClient {
                 }))
             })
             .collect();
-        let body = serde_json::json!({
-            "model": opts.model,
+        let mut body = serde_json::json!({
+            "model": model_slug,
             "input": input_items,
             "stream": true,
         });
+        if let Some(v) = verbosity {
+            if let Some(map) = body.as_object_mut() {
+                map.insert("text".to_string(), serde_json::json!({ "verbosity": v }));
+            }
+        }
         let client = self.http.clone();
         let send = client.post(url).json(&body).send();
         let idle = self.cfg.stream_idle_timeout;
@@ -279,9 +328,13 @@ impl OpenAiClient {
 }
 
 fn map_reqwest_err(e: reqwest::Error) -> ChatError {
-    if e.is_timeout() { ChatError::Timeout(e.to_string()) }
-    else if e.is_request() || e.is_connect() { ChatError::Network(e.to_string()) }
-    else { ChatError::Other(e.to_string()) }
+    if e.is_timeout() {
+        ChatError::Timeout(e.to_string())
+    } else if e.is_request() || e.is_connect() {
+        ChatError::Network(e.to_string())
+    } else {
+        ChatError::Other(e.to_string())
+    }
 }
 
 fn map_status_err(status: StatusCode, body: Option<String>) -> ChatError {
@@ -289,14 +342,19 @@ fn map_status_err(status: StatusCode, body: Option<String>) -> ChatError {
     match status {
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => ChatError::Auth(s),
         StatusCode::TOO_MANY_REQUESTS => ChatError::RateLimit(s),
-        StatusCode::INTERNAL_SERVER_ERROR | StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT => ChatError::Network(s),
+        StatusCode::INTERNAL_SERVER_ERROR
+        | StatusCode::BAD_GATEWAY
+        | StatusCode::SERVICE_UNAVAILABLE
+        | StatusCode::GATEWAY_TIMEOUT => ChatError::Network(s),
         StatusCode::NOT_FOUND => ChatError::Protocol("404".into()),
         _ => ChatError::Other(s),
     }
 }
 
 fn find_event_boundary(buf: &bytes::BytesMut) -> Option<usize> {
-    if let Some(p) = twoway::find_bytes(&buf, b"\r\n\r\n") { return Some(p); }
+    if let Some(p) = twoway::find_bytes(&buf, b"\r\n\r\n") {
+        return Some(p);
+    }
     twoway::find_bytes(&buf, b"\n\n")
 }
 
@@ -304,32 +362,61 @@ fn parse_chat_sse_event(ev: &bytes::Bytes) -> Result<Option<ChatDelta>, ChatErro
     let s = std::str::from_utf8(ev).map_err(|e| ChatError::Decode(e.to_string()))?;
     let mut data_lines = Vec::new();
     for line in s.lines() {
-        if let Some(rest) = line.strip_prefix("data:") { data_lines.push(rest.trim_start()); }
+        if let Some(rest) = line.strip_prefix("data:") {
+            data_lines.push(rest.trim_start());
+        }
     }
-    if data_lines.is_empty() { return Ok(None); }
-    if data_lines.len() == 1 && data_lines[0] == "[DONE]" { return Ok(Some(ChatDelta::Finish(None))); }
+    if data_lines.is_empty() {
+        return Ok(None);
+    }
+    if data_lines.len() == 1 && data_lines[0] == "[DONE]" {
+        return Ok(Some(ChatDelta::Finish(None)));
+    }
     let json_text = data_lines.join("\n");
-    let v: serde_json::Value = serde_json::from_str(&json_text).map_err(|e| ChatError::Decode(e.to_string()))?;
-    if let Some(content) = v["choices"][0]["delta"]["content"].as_str() { return Ok(Some(ChatDelta::Text(content.to_string()))); }
+    let v: serde_json::Value =
+        serde_json::from_str(&json_text).map_err(|e| ChatError::Decode(e.to_string()))?;
+    if let Some(content) = v["choices"][0]["delta"]["content"].as_str() {
+        return Ok(Some(ChatDelta::Text(content.to_string())));
+    }
     if let Some(role) = v["choices"][0]["delta"]["role"].as_str() {
-        let r = match role { "user"=>Role::User, "assistant"=>Role::Assistant, "system"=>Role::System, _=>Role::Assistant };
+        let r = match role {
+            "user" => Role::User,
+            "assistant" => Role::Assistant,
+            "system" => Role::System,
+            _ => Role::Assistant,
+        };
         return Ok(Some(ChatDelta::RoleStart(r)));
     }
-    if let Some(fr) = v["choices"][0]["finish_reason"].as_str() { return Ok(Some(ChatDelta::Finish(Some(fr.to_string())))); }
+    if let Some(fr) = v["choices"][0]["finish_reason"].as_str() {
+        return Ok(Some(ChatDelta::Finish(Some(fr.to_string()))));
+    }
     Ok(None)
 }
 
 fn parse_responses_event(buf: &mut bytes::BytesMut) -> Result<Option<(String, String)>, ChatError> {
     // Extract one SSE block (terminated by a blank line), parse event+data.
-    let content = match std::str::from_utf8(&buf) { Ok(s) => s, Err(_) => return Ok(None) };
-    let (block_end, adv) = if let Some(p) = content.find("\r\n\r\n") { (p, 4) } else if let Some(p) = content.find("\n\n") { (p, 2) } else { return Ok(None) };
+    let content = match std::str::from_utf8(&buf) {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+    let (block_end, adv) = if let Some(p) = content.find("\r\n\r\n") {
+        (p, 4)
+    } else if let Some(p) = content.find("\n\n") {
+        (p, 2)
+    } else {
+        return Ok(None);
+    };
     let block = &content[..block_end];
 
     let mut event: Option<String> = None;
     let mut data_lines: Vec<&str> = Vec::new();
     for line in block.lines() {
-        if let Some(v) = line.strip_prefix("event:") { event = Some(v.trim().to_string()); }
-        if let Some(v) = line.strip_prefix("data:") { data_lines.push(v.trim()); }
+        if let Some(v) = line.strip_prefix("event:") {
+            event = Some(v.trim().to_string());
+        }
+        if let Some(v) = line.strip_prefix("data:") {
+            data_lines.push(v.trim());
+        }
     }
     let data_text = data_lines.join("\n");
 
@@ -341,21 +428,34 @@ fn parse_responses_event(buf: &mut bytes::BytesMut) -> Result<Option<(String, St
             Ok(v) => v["type"].as_str().unwrap_or("").to_string(),
             Err(_) => String::new(),
         }
-    } else { String::new() };
+    } else {
+        String::new()
+    };
 
     // Prepare returned `data` based on the event kind for convenience.
     let ret = if ev == "response.output_text.delta" {
         if data_text.trim().starts_with('{') {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data_text) {
                 v["delta"].as_str().unwrap_or("").to_string()
-            } else { data_text.clone() }
-        } else { data_text.clone() }
+            } else {
+                data_text.clone()
+            }
+        } else {
+            data_text.clone()
+        }
     } else if ev == "response.error" {
         if data_text.trim().starts_with('{') {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data_text) {
-                v["error"]["message"].as_str().unwrap_or(&data_text).to_string()
-            } else { data_text.clone() }
-        } else { data_text.clone() }
+                v["error"]["message"]
+                    .as_str()
+                    .unwrap_or(&data_text)
+                    .to_string()
+            } else {
+                data_text.clone()
+            }
+        } else {
+            data_text.clone()
+        }
     } else {
         data_text.clone()
     };
@@ -363,6 +463,8 @@ fn parse_responses_event(buf: &mut bytes::BytesMut) -> Result<Option<(String, St
     // Consume this block from buffer
     buf.advance(block_end + adv);
 
-    if ev.is_empty() { return Ok(None); }
+    if ev.is_empty() {
+        return Ok(None);
+    }
     Ok(Some((ev, ret)))
 }

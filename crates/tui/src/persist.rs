@@ -12,6 +12,9 @@ pub struct SavedState {
     pub current_session: usize,
     pub show_sidebar: bool,
     pub sidebar_scroll: u16,
+    // Runtime model/wire selection (optional for backward compatibility)
+    pub model: Option<String>,
+    pub wire_api: Option<String>,
 }
 
 impl From<&App> for SavedState {
@@ -21,6 +24,8 @@ impl From<&App> for SavedState {
             current_session: a.current_session,
             show_sidebar: a.show_sidebar,
             sidebar_scroll: a.sidebar_scroll,
+            model: Some(a.model_label.clone()),
+            wire_api: Some(a.wire_label.clone()),
         }
     }
 }
