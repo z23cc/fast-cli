@@ -7,11 +7,11 @@ mod theme;
 mod ui;
 
 use anyhow::Result;
+use directories::BaseDirs;
+use std::fs;
+use std::path::PathBuf;
 use terminal::TerminalGuard;
 use tracing_subscriber::{fmt, EnvFilter};
-use std::path::PathBuf;
-use std::fs;
-use directories::BaseDirs;
 
 fn main() -> Result<()> {
     init_logging();

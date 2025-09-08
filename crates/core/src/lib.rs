@@ -36,7 +36,10 @@ pub mod llm {
         RoleStart(Role),
         Text(String),
         Finish(Option<String>),
-        Usage { prompt_tokens: Option<u32>, completion_tokens: Option<u32> },
+        Usage {
+            prompt_tokens: Option<u32>,
+            completion_tokens: Option<u32>,
+        },
     }
 
     #[derive(Clone, Debug)]
@@ -49,14 +52,22 @@ pub mod llm {
 
     #[derive(Error, Debug)]
     pub enum ChatError {
-        #[error("auth error: {0}")] Auth(String),
-        #[error("rate limit: {0}")] RateLimit(String),
-        #[error("timeout: {0}")] Timeout(String),
-        #[error("network: {0}")] Network(String),
-        #[error("decode: {0}")] Decode(String),
-        #[error("protocol: {0}")] Protocol(String),
-        #[error("canceled")] Canceled,
-        #[error("other: {0}")] Other(String),
+        #[error("auth error: {0}")]
+        Auth(String),
+        #[error("rate limit: {0}")]
+        RateLimit(String),
+        #[error("timeout: {0}")]
+        Timeout(String),
+        #[error("network: {0}")]
+        Network(String),
+        #[error("decode: {0}")]
+        Decode(String),
+        #[error("protocol: {0}")]
+        Protocol(String),
+        #[error("canceled")]
+        Canceled,
+        #[error("other: {0}")]
+        Other(String),
     }
 
     pub type ChatStream<'a> = Pin<Box<dyn Stream<Item = Result<ChatDelta, ChatError>> + Send + 'a>>;
@@ -65,7 +76,11 @@ pub mod llm {
 
     #[allow(async_fn_in_trait)]
     pub trait ModelClient: Send + Sync {
-        async fn send_chat(&self, msgs: &[Message], opts: &ChatOpts) -> Result<ChatResult, ChatError>;
+        async fn send_chat(
+            &self,
+            msgs: &[Message],
+            opts: &ChatOpts,
+        ) -> Result<ChatResult, ChatError>;
         async fn stream_chat<'a>(
             &'a self,
             msgs: Vec<Message>,
@@ -75,4 +90,6 @@ pub mod llm {
     }
 }
 
-pub fn ping() -> &'static str { "core-ok" }
+pub fn ping() -> &'static str {
+    "core-ok"
+}

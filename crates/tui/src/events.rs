@@ -150,12 +150,21 @@ pub fn run<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> anyhow::Res
                         if inside {
                             match me.kind {
                                 MouseEventKind::ScrollUp => {
-                                    let max = app.context_items.len().saturating_sub(area.height.saturating_sub(2) as usize) as u16;
-                                    app.context_scroll = app.context_scroll.saturating_sub(1).min(max);
+                                    let max = app
+                                        .context_items
+                                        .len()
+                                        .saturating_sub(area.height.saturating_sub(2) as usize)
+                                        as u16;
+                                    app.context_scroll =
+                                        app.context_scroll.saturating_sub(1).min(max);
                                     app.dirty = true;
                                 }
                                 MouseEventKind::ScrollDown => {
-                                    let max = app.context_items.len().saturating_sub(area.height.saturating_sub(2) as usize) as u16;
+                                    let max = app
+                                        .context_items
+                                        .len()
+                                        .saturating_sub(area.height.saturating_sub(2) as usize)
+                                        as u16;
                                     app.context_scroll = (app.context_scroll + 1).min(max);
                                     app.dirty = true;
                                 }

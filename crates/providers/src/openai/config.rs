@@ -27,9 +27,10 @@ pub struct OpenAiConfig {
 
 impl OpenAiConfig {
     pub fn from_env_and_file() -> anyhow::Result<Self> {
-        let api_key = env::var("OPENAI_API_KEY")
-            .map_err(|_| anyhow::anyhow!("OPENAI_API_KEY not set"))?;
-        let base_url = env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+        let api_key =
+            env::var("OPENAI_API_KEY").map_err(|_| anyhow::anyhow!("OPENAI_API_KEY not set"))?;
+        let base_url =
+            env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
 
         let mut model = "gpt-5".to_string();
         let mut wire_api = "responses".to_string();
@@ -41,17 +42,29 @@ impl OpenAiConfig {
             if path.exists() {
                 if let Ok(toml) = fs::read_to_string(&path) {
                     if let Ok(file_cfg) = toml::from_str::<OpenAiFileConfig>(&toml) {
-                        if let Some(m) = file_cfg.model { model = m; }
-                        if let Some(w) = file_cfg.wire_api { wire_api = w; }
-                        if let Some(t) = file_cfg.timeout_ms { timeout_ms = t; }
-                        if let Some(r) = file_cfg.stream_max_retries { stream_max_retries = r; }
-                        if let Some(idle) = file_cfg.stream_idle_timeout_ms { stream_idle_timeout_ms = idle; }
+                        if let Some(m) = file_cfg.model {
+                            model = m;
+                        }
+                        if let Some(w) = file_cfg.wire_api {
+                            wire_api = w;
+                        }
+                        if let Some(t) = file_cfg.timeout_ms {
+                            timeout_ms = t;
+                        }
+                        if let Some(r) = file_cfg.stream_max_retries {
+                            stream_max_retries = r;
+                        }
+                        if let Some(idle) = file_cfg.stream_idle_timeout_ms {
+                            stream_idle_timeout_ms = idle;
+                        }
                     }
                 }
             }
         }
 
-        let proxy = env::var("HTTPS_PROXY").ok().or_else(|| env::var("HTTP_PROXY").ok());
+        let proxy = env::var("HTTPS_PROXY")
+            .ok()
+            .or_else(|| env::var("HTTP_PROXY").ok());
 
         Ok(OpenAiConfig {
             api_key,

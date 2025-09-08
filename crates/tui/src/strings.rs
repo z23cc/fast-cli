@@ -77,7 +77,10 @@ pub fn build_status_line(
     if let Some((prov, model, wire)) = provider {
         segments.push(format!("[{}][{}][{}]", prov, model, wire));
     }
-    segments.push(format!("[{}][{}] L{} C{}", stick, focus, line_disp, col_disp));
+    segments.push(format!(
+        "[{}][{}] L{} C{}",
+        stick, focus, line_disp, col_disp
+    ));
     segments.push(format!("Hist:{}", history_len));
     segments.push(format!("Ctx:{}", context_len));
     if let Some((q, cur, total)) = search_info {
@@ -97,18 +100,28 @@ pub fn build_status_line(
         "Ctrl+F: search; F3/Shift+F3: next/prev",
         "?: help",
     ];
-    for h in hints { segments.push(h.to_string()); }
+    for h in hints {
+        segments.push(h.to_string());
+    }
 
     let sep = "  |  ";
     let mut out = String::new();
     let mut used = 0usize;
     for (i, seg) in segments.iter().enumerate() {
         let segw = UnicodeWidthStr::width(seg.as_str());
-        let addw = segw + if i == 0 { 0 } else { UnicodeWidthStr::width(sep) };
+        let addw = segw
+            + if i == 0 {
+                0
+            } else {
+                UnicodeWidthStr::width(sep)
+            };
         if used + addw > max_width as usize {
             break;
         }
-        if i > 0 { out.push_str(sep); used += UnicodeWidthStr::width(sep); }
+        if i > 0 {
+            out.push_str(sep);
+            used += UnicodeWidthStr::width(sep);
+        }
         out.push_str(seg);
         used += segw;
     }

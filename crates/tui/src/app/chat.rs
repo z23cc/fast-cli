@@ -8,15 +8,15 @@ use super::{App, Message, Role, WrappedMsg};
 impl App {
     // Compute displayed lines for a message considering collapse/threshold rules.
     pub fn message_display_info(&self, idx: usize) -> (usize, bool) {
-        let base = self
-            .chat_cache
-            .get(idx)
-            .map(|w| w.lines.len())
-            .unwrap_or(0);
+        let base = self.chat_cache.get(idx).map(|w| w.lines.len()).unwrap_or(0);
         let collapsed = self.collapsed.get(idx).copied().unwrap_or(false);
         let preview = self.collapse_preview_lines;
         let threshold = self.collapse_threshold_lines;
-        let display = if collapsed && base > preview { preview } else { base };
+        let display = if collapsed && base > preview {
+            preview
+        } else {
+            base
+        };
         let has_indicator = if collapsed && base > preview {
             true
         } else {
@@ -51,7 +51,8 @@ impl App {
 
     // Adjust chat_scroll to bring a global line index into view.
     pub fn set_scroll_to_show_global(&mut self, inner_height: u16, global_line: usize) {
-        let (viewport, max_scroll, _start, effective_total) = self.compute_chat_layout(inner_height);
+        let (viewport, max_scroll, _start, effective_total) =
+            self.compute_chat_layout(inner_height);
         let _ = viewport; // not used further, but kept for clarity
         if effective_total == 0 {
             self.chat_scroll = 0;
