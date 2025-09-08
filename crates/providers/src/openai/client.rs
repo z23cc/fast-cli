@@ -129,11 +129,20 @@ impl OpenAiClient {
     ) -> Result<fast_core::llm::ChatStream<'a>, ChatError> {
         match self.stream_responses(msgs.clone(), opts.clone()).await {
             Ok(s) => Ok(s),
-            Err(ChatError::Protocol(e)) if e.contains("404") => {
-                self.stream_chat_completions(msgs, opts).await
+            Err(ChatError::Protocol(e)) => {
+                // Fallback for Responses not available in this deployment
+                if e.contains("404") || e.contains("400") || e.to_lowercase().contains("responses")
+                {
+                    return self.stream_chat_completions(msgs, opts).await;
+                }
+                Err(ChatError::Protocol(e))
             }
-            Err(ChatError::Other(e)) if e.contains("404") => {
-                self.stream_chat_completions(msgs, opts).await
+            Err(ChatError::Other(e)) => {
+                // Many providers return 400 for unsupported endpoints/params
+                if e.starts_with("400 ") || e.contains("404") {
+                    return self.stream_chat_completions(msgs, opts).await;
+                }
+                Err(ChatError::Other(e))
             }
             Err(e) => Err(e),
         }
@@ -213,7 +222,7 @@ impl OpenAiClient {
         }
 
         let merged = async_stream::try_stream! {
-            let mut acc_len: usize = 0;
+            let mut acc = String::new();
             loop {
                 let s = sse_stream(req(), idle).await;
                 match s {
@@ -221,8 +230,17 @@ impl OpenAiClient {
                         let mut st = Box::pin(st);
                         while let Some(it) = st.as_mut().next().await {
                             let d = it?;
-                            if let ChatDelta::Text(ref t) = d { acc_len += t.len(); }
-                            yield d;
+                            match d {
+                                ChatDelta::Text(t) => {
+                                    if let Some(app) = dedup_delta(&acc, &t) {
+                                        acc.push_str(&app);
+                                        yield ChatDelta::Text(app);
+                                    } else {
+                                        // fully duplicated, skip
+                                    }
+                                }
+                                other => { yield other; }
+                            }
                         }
                         break;
                     }
@@ -249,24 +267,21 @@ impl OpenAiClient {
         info!(target:"providers::openai","start responses stream model={} url={}", opts.model, url);
         let (model_slug, verbosity) = Self::normalize_gpt5(&opts.model);
         // Responses API expects input to be a list of role/content items.
-        // Map our chat history into the required shape.
         let input_items: Vec<serde_json::Value> = msgs
             .iter()
             .filter_map(|m| {
-                // Skip placeholder assistant messages with empty content
                 let is_assistant = matches!(m.role, Role::Assistant);
                 if is_assistant && m.content.trim().is_empty() {
                     return None;
                 }
-
                 let role = match m.role {
                     Role::System => "system",
                     Role::User => "user",
                     Role::Assistant => "assistant",
                 };
                 let content_type = match m.role {
-                    Role::Assistant => "output_text", // prior model outputs
-                    _ => "input_text",                // user/system instructions
+                    Role::Assistant => "output_text",
+                    _ => "input_text",
                 };
                 Some(serde_json::json!({
                     "role": role,
@@ -274,56 +289,112 @@ impl OpenAiClient {
                 }))
             })
             .collect();
-        let mut body = serde_json::json!({
-            "model": model_slug,
-            "input": input_items,
-            "stream": true,
-        });
+        let mut body =
+            serde_json::json!({ "model": model_slug, "input": input_items, "stream": true });
         if let Some(v) = verbosity {
             if let Some(map) = body.as_object_mut() {
                 map.insert("text".to_string(), serde_json::json!({ "verbosity": v }));
             }
         }
         let client = self.http.clone();
-        let send = client.post(url).json(&body).send();
         let idle = self.cfg.stream_idle_timeout;
-        let s = async_stream::stream! {
-            let resp = send.await.map_err(map_reqwest_err)?;
-            if !resp.status().is_success() { let status=resp.status(); let body=resp.text().await.ok(); error!(target:"providers::openai","responses non-200 status={} body={:?}",status,body); yield Err(map_status_err(status, body)); return; }
+        let mut attempt = 0u32;
+        let max_attempts = self.cfg.stream_max_retries.max(1);
+
+        async fn responses_sse_stream(
+            send_fut: impl std::future::Future<Output = Result<reqwest::Response, reqwest::Error>>,
+            idle: Duration,
+        ) -> Result<impl Stream<Item = Result<ChatDelta, ChatError>>, ChatError> {
+            let resp = send_fut.await.map_err(map_reqwest_err)?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.ok();
+                error!(target:"providers::openai","responses non-200 status={} body={:?}", status, body);
+                return Err(map_status_err(status, body));
+            }
             let mut stream = resp.bytes_stream();
             let mut buf = bytes::BytesMut::new();
             let mut last = Instant::now();
-            'outer: loop {
-                tokio::select! {
-                    chunk = stream.next() => {
-                        match chunk {
-                            Some(Ok(b)) => {
-                                buf.extend_from_slice(&b);
-                                last = Instant::now();
-                                loop {
-                                    match parse_responses_event(&mut buf) {
-                                        Ok(Some((event, data))) => match event.as_str() {
-                                            "response.output_text.delta" => yield Ok(ChatDelta::Text(data)),
-                                            "response.completed" => { yield Ok(ChatDelta::Finish(None)); break 'outer; },
-                                            "response.error" => { yield Err(ChatError::Protocol(data)); break 'outer; },
-                                            _ => {}
-                                        },
-                                        Ok(None) => { break; }
-                                        Err(e) => { yield Err(e); break 'outer; }
+            let s = async_stream::stream! {
+                'outer: loop {
+                    tokio::select! {
+                        chunk = stream.next() => {
+                            match chunk {
+                                Some(Ok(b)) => {
+                                    buf.extend_from_slice(&b);
+                                    last = Instant::now();
+                                    loop {
+                                        match parse_responses_event(&mut buf) {
+                                            Ok(Some((event, data))) => match event.as_str() {
+                                                "response.output_text.delta" => yield Ok(ChatDelta::Text(data)),
+                                                "response.completed" => {
+                                                    // Try to parse usage tokens if present
+                                                    if data.trim().starts_with('{') {
+                                                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
+                                                            let (pt, ct) = extract_usage_tokens(&v);
+                                                            if pt.is_some() || ct.is_some() {
+                                                                yield Ok(ChatDelta::Usage { prompt_tokens: pt, completion_tokens: ct });
+                                                            }
+                                                        }
+                                                    }
+                                                    yield Ok(ChatDelta::Finish(None));
+                                                    break 'outer;
+                                                },
+                                                "response.error" => { yield Err(ChatError::Protocol(data)); break 'outer; },
+                                                _ => {}
+                                            },
+                                            Ok(None) => { break; },
+                                            Err(e) => { yield Err(e); break 'outer; }
+                                        }
                                     }
                                 }
+                                Some(Err(e)) => { yield Err(map_reqwest_err(e)); break 'outer; }
+                                None => { break 'outer; }
                             }
-                            Some(Err(e)) => { yield Err(map_reqwest_err(e)); break 'outer; }
-                            None => { break 'outer; }
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                            if last.elapsed() > idle { yield Err(ChatError::Timeout("idle".into())); break 'outer; }
                         }
                     }
-                    _ = tokio::time::sleep(Duration::from_millis(500)) => {
-                        if last.elapsed() > idle { yield Err(ChatError::Timeout("idle".into())); break 'outer; }
+                }
+            };
+            Ok(s)
+        }
+
+        let merged = async_stream::try_stream! {
+            let mut acc = String::new();
+            loop {
+                let req_fut = client.post(&url).json(&body).send();
+                let s = responses_sse_stream(req_fut, idle).await;
+                match s {
+                    Ok(st) => {
+                        let mut st = Box::pin(st);
+                        while let Some(it) = st.as_mut().next().await {
+                            let d = it?;
+                            match d {
+                                ChatDelta::Text(t) => {
+                                    if let Some(app) = dedup_delta(&acc, &t) {
+                                        acc.push_str(&app);
+                                        yield ChatDelta::Text(app);
+                                    }
+                                }
+                                other => { yield other; }
+                            }
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        attempt += 1;
+                        if attempt >= max_attempts { Err(e)? } else {
+                            let backoff = Duration::from_millis(300 * attempt as u64);
+                            sleep(backoff).await;
+                            continue;
+                        }
                     }
                 }
             }
         };
-        Ok(Box::pin(s))
+        Ok(Box::pin(merged))
     }
 }
 
@@ -467,4 +538,55 @@ fn parse_responses_event(buf: &mut bytes::BytesMut) -> Result<Option<(String, St
         return Ok(None);
     }
     Ok(Some((ev, ret)))
+}
+
+fn dedup_delta(acc: &str, delta: &str) -> Option<String> {
+    if delta.is_empty() {
+        return None;
+    }
+    // Find the longest prefix of delta that is also a suffix of acc
+    let max_k = std::cmp::min(acc.len(), delta.len());
+    // Iterate over valid char boundaries of delta prefix to avoid UTF‑8 slicing issues
+    let mut best = 0usize;
+    let mut idx = 0usize;
+    for (i, _) in delta.char_indices() {
+        // i is a char boundary
+        idx = i;
+        if i > max_k {
+            break;
+        }
+        if acc.ends_with(&delta[..i]) {
+            best = i;
+        }
+    }
+    // Also consider full length if delta is entirely overlapping
+    if acc.ends_with(delta) {
+        best = delta.len();
+    }
+    if best >= delta.len() {
+        return None;
+    }
+    Some(delta[best..].to_string())
+}
+
+fn extract_usage_tokens(v: &serde_json::Value) -> (Option<u32>, Option<u32>) {
+    // Try common shapes: { response: { usage: { input_tokens, output_tokens } } }
+    let mut pt = None;
+    let mut ct = None;
+    if let Some(u) = v.pointer("/response/usage") {
+        if let Some(x) = u.get("input_tokens").and_then(|x| x.as_u64()) {
+            pt = Some(x as u32);
+        }
+        if let Some(x) = u.get("output_tokens").and_then(|x| x.as_u64()) {
+            ct = Some(x as u32);
+        }
+    } else if let Some(u) = v.get("usage") {
+        if let Some(x) = u.get("prompt_tokens").and_then(|x| x.as_u64()) {
+            pt = Some(x as u32);
+        }
+        if let Some(x) = u.get("completion_tokens").and_then(|x| x.as_u64()) {
+            ct = Some(x as u32);
+        }
+    }
+    (pt, ct)
 }

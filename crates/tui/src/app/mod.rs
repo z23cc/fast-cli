@@ -4,6 +4,7 @@ use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 use unicode_segmentation::UnicodeSegmentation;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 pub mod chat;
 pub mod history;
@@ -105,6 +106,7 @@ pub struct App {
     pub palette: Option<PaletteState>,
     pub model_picker: Option<ModelPickerState>,
     pub llm_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    pub llm_cancel: Option<Arc<AtomicBool>>,
     // Provider/model info for status bar
     pub provider_label: String,
     pub model_label: String,
@@ -200,6 +202,7 @@ impl App {
             palette: None,
             model_picker: None,
             llm_rx: None,
+            llm_cancel: None,
             provider_label: String::from("OpenAI"),
             model_label: String::from("gpt-5"),
             wire_label: String::from("responses"),
@@ -259,6 +262,8 @@ impl App {
         // Start real LLM streaming in a background thread
         let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
         self.llm_rx = Some(rx);
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        self.llm_cancel = Some(cancel_flag.clone());
         // Build snapshot for provider: drop any assistant messages before the
         // first user message (e.g., the initial welcome banner), and skip
         // empty assistant placeholders we append for streaming.
@@ -318,17 +323,27 @@ impl App {
                 match res {
                     Ok(mut s) => {
                         use futures::StreamExt;
-                        while let Some(it) = s.next().await {
-                            match it {
-                                Ok(fast_core::llm::ChatDelta::Text(t)) => {
-                                    let _ = tx.send(Ok(t));
+                        let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
+                        loop {
+                            tokio::select! {
+                                _ = tick.tick() => {
+                                    if cancel_flag.load(Ordering::Relaxed) {
+                                        let _ = tx.send(Err("canceled".into()));
+                                        break;
+                                    }
                                 }
-                                Ok(fast_core::llm::ChatDelta::Finish(_)) => break,
-                                Ok(_) => {}
-                                Err(e) => {
-                                    let _ = tx.send(Err(format!("{}", e)));
-                                    error!(target: "tui", "stream delta error: {}", e);
-                                    break;
+                                it = s.next() => {
+                                    match it {
+                                        Some(Ok(fast_core::llm::ChatDelta::Text(t))) => { let _ = tx.send(Ok(t)); }
+                                        Some(Ok(fast_core::llm::ChatDelta::Finish(_))) => { break; }
+                                        Some(Ok(_)) => { /* ignore other events for now */ }
+                                        Some(Err(e)) => {
+                                            let _ = tx.send(Err(format!("{}", e)));
+                                            error!(target: "tui", "stream delta error: {}", e);
+                                            break;
+                                        }
+                                        None => { break; }
+                                    }
                                 }
                             }
                         }
@@ -673,7 +688,12 @@ impl App {
 
             match key.code {
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.should_quit = true;
+                    // Ctrl+C: cancel active stream if any; otherwise quit
+                    if self.llm_rx.is_some() {
+                        if let Some(cancel) = &self.llm_cancel { cancel.store(true, Ordering::Relaxed); }
+                    } else {
+                        self.should_quit = true;
+                    }
                 }
                 KeyCode::Esc => self.should_quit = true,
                 KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -965,6 +985,8 @@ impl App {
                             msg.content.push_str(&format!("\n[error] {}", e));
                         }
                         self.llm_rx = None;
+                        self.llm_cancel = None;
+                        let _ = crate::persist::save_session(self.current_session_name(), &self.messages);
                         break;
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -972,6 +994,8 @@ impl App {
                     }
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         self.llm_rx = None;
+                        self.llm_cancel = None;
+                        let _ = crate::persist::save_session(self.current_session_name(), &self.messages);
                         break;
                     }
                 }
