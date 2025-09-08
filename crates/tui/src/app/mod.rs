@@ -6,6 +6,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+use std::time::Duration;
 use tracing::{error, info};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -110,7 +111,7 @@ pub struct App {
     pub model_picker: Option<ModelPickerState>,
     pub wire_picker: Option<WirePickerState>,
     pub slash_picker: Option<SlashPickerState>,
-    pub llm_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    pub llm_rx: Option<std::sync::mpsc::Receiver<StreamEvent>>,
     pub llm_cancel: Option<Arc<AtomicBool>>,
     // Provider/model info for status bar
     pub provider_label: String,
@@ -122,6 +123,9 @@ pub struct App {
     pub max_tokens: Option<u32>,
     // Model suggestions from config
     pub model_suggestions: Vec<String>,
+    // Last-turn usage tokens (if provided by provider)
+    pub usage_prompt_tokens: Option<u32>,
+    pub usage_completion_tokens: Option<u32>,
 }
 
 impl App {
@@ -163,6 +167,11 @@ impl App {
                 true
             }
             "wire" => {
+                if arg.is_empty() {
+                    self.open_wire_picker();
+                    self.dirty = true;
+                    return true;
+                }
                 let v = arg.to_lowercase();
                 if matches!(v.as_str(), "responses" | "chat" | "auto") {
                     self.wire_label = v;
@@ -235,7 +244,7 @@ impl App {
             chat_scroll: 0,
             tick: 0,
             stream: None,
-            show_sidebar: true,
+            show_sidebar: false,
             show_help: false,
             chat_area: None,
             sidebar_area: None,
@@ -276,6 +285,8 @@ impl App {
             top_p: None,
             max_tokens: None,
             model_suggestions: Vec::new(),
+            usage_prompt_tokens: None,
+            usage_completion_tokens: None,
         };
         // Try to read provider config for status
         if let Ok(cfg) = providers::openai::config::OpenAiConfig::from_env_and_file() {
@@ -323,6 +334,9 @@ impl App {
         if text.is_empty() {
             return;
         }
+        // Reset last-turn usage at the start of a new request
+        self.usage_prompt_tokens = None;
+        self.usage_completion_tokens = None;
 
         // Slash commands (e.g., /model <name>, /wire <responses|chat|auto>)
         if self.try_handle_slash_command(&text) {
@@ -340,7 +354,7 @@ impl App {
         self.messages.push(Message::assistant(String::new()));
         self.collapsed.push(false);
         // Start real LLM streaming in a background thread
-        let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+        let (tx, rx) = std::sync::mpsc::channel::<StreamEvent>();
         self.llm_rx = Some(rx);
         let cancel_flag = Arc::new(AtomicBool::new(false));
         self.llm_cancel = Some(cancel_flag.clone());
@@ -377,7 +391,7 @@ impl App {
                 let cfg = match providers::openai::config::OpenAiConfig::from_env_and_file() {
                     Ok(c) => c,
                     Err(e) => {
-                        let _ = tx.send(Err(format!("config: {}", e)));
+                        let _ = tx.send(StreamEvent::Error(format!("config: {}", e)));
                         error!(target: "tui", "submit config error: {}", e);
                         return;
                     }
@@ -385,7 +399,7 @@ impl App {
                 let client = match providers::openai::OpenAiClient::new(cfg.clone()) {
                     Ok(c) => c,
                     Err(e) => {
-                        let _ = tx.send(Err(format!("client: {}", e)));
+                        let _ = tx.send(StreamEvent::Error(format!("client: {}", e)));
                         error!(target: "tui", "submit client build error: {}", e);
                         return;
                     }
@@ -411,17 +425,18 @@ impl App {
                             tokio::select! {
                                 _ = tick.tick() => {
                                     if cancel_flag.load(Ordering::Relaxed) {
-                                        let _ = tx.send(Err("canceled".into()));
+                                        let _ = tx.send(StreamEvent::Error("canceled".into()));
                                         break;
                                     }
                                 }
                                 it = s.next() => {
                                     match it {
-                                        Some(Ok(fast_core::llm::ChatDelta::Text(t))) => { let _ = tx.send(Ok(t)); }
+                                        Some(Ok(fast_core::llm::ChatDelta::Text(t))) => { let _ = tx.send(StreamEvent::Text(t)); }
+                                        Some(Ok(fast_core::llm::ChatDelta::Usage{prompt_tokens, completion_tokens})) => { let _ = tx.send(StreamEvent::Usage{prompt_tokens, completion_tokens}); }
                                         Some(Ok(fast_core::llm::ChatDelta::Finish(_))) => { break; }
                                         Some(Ok(_)) => { /* ignore other events for now */ }
                                         Some(Err(e)) => {
-                                            let _ = tx.send(Err(format!("{}", e)));
+                                            let _ = tx.send(StreamEvent::Error(format!("{}", e)));
                                             error!(target: "tui", "stream delta error: {}", e);
                                             break;
                                         }
@@ -432,7 +447,7 @@ impl App {
                         }
                     }
                     Err(e) => {
-                        let _ = tx.send(Err(format!("{}", e)));
+                        let _ = tx.send(StreamEvent::Error(format!("{}", e)));
                         error!(target: "tui", "stream start error: {}", e);
                     }
                 }
@@ -1220,14 +1235,23 @@ impl App {
         if let Some(rx) = &self.llm_rx {
             for _ in 0..64 {
                 match rx.try_recv() {
-                    Ok(Ok(s)) => {
+                    Ok(StreamEvent::Text(s)) => {
                         if let Some(msg) = self.messages.last_mut() {
                             msg.content.push_str(&s);
                         }
                         self.dirty = true;
                         self.stick_to_bottom = true;
                     }
-                    Ok(Err(e)) => {
+                    Ok(StreamEvent::Usage {
+                        prompt_tokens,
+                        completion_tokens,
+                    }) => {
+                        self.usage_prompt_tokens = prompt_tokens;
+                        self.usage_completion_tokens = completion_tokens;
+                        // usage info will be rendered persistently in the status line
+                        self.dirty = true;
+                    }
+                    Ok(StreamEvent::Error(e)) => {
                         if let Some(msg) = self.messages.last_mut() {
                             msg.content.push_str(&format!("\n[error] {}", e));
                         }
@@ -1256,6 +1280,18 @@ impl App {
         }
     }
 }
+
+#[derive(Clone, Debug)]
+pub enum StreamEvent {
+    Text(String),
+    Usage {
+        prompt_tokens: Option<u32>,
+        completion_tokens: Option<u32>,
+    },
+    Error(String),
+}
+
+// no toast: usage info is shown persistently in the status line above input
 
 #[derive(Clone)]
 pub struct SearchInput {

@@ -139,42 +139,37 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_main(f: &mut Frame, area: Rect, app: &mut App) {
+    // Compute input visible lines based on available width (bordered input: inner width is area.width - 2)
     let inner_width = area.width.saturating_sub(2) as usize;
     let input_total_lines = measure_total_lines(&app.input, inner_width as u16).max(1) as u16;
     let target_lines = input_total_lines.min(app.input_max_lines);
     let current = app.input_visible_lines.max(1);
-    let new_visible = if current < target_lines {
+    let mut new_visible = if current < target_lines {
         current + 1
     } else if current > target_lines {
         current - 1
     } else {
         current
     };
+    // Ensure total height fits: only input border box (no extra status line)
+    let needed = new_visible + 2; // input border box height
+    if needed > area.height {
+        let clamped = area.height.max(3); // keep borders
+        new_visible = clamped.saturating_sub(2).max(1);
+    }
     app.input_visible_lines = new_visible;
-    let input_height = app.input_visible_lines + 2;
+    let input_height = app.input_visible_lines + 2; // include borders
 
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(5),
-            Constraint::Length(1),
-            Constraint::Length(input_height),
-        ])
+        .constraints([Constraint::Min(0), Constraint::Length(input_height)])
         .split(area);
 
     app.chat_area = Some(main_chunks[0]);
-
     draw_chat(f, main_chunks[0], app);
-    draw_status(
-        f,
-        main_chunks[1],
-        app,
-        app.input_visible_lines,
-        inner_width as u16,
-    );
     draw_input(
         f,
-        main_chunks[2],
+        main_chunks[1],
         app,
         app.input_visible_lines,
         inner_width as u16,
@@ -270,11 +265,14 @@ fn draw_chat(f: &mut Frame, area: Rect, app: &mut App) {
         };
         let header_style = match cached.role {
             Role::User => Style::default()
-                .fg(Color::Green)
+                .fg(THEME.border_focus)
                 .add_modifier(Modifier::BOLD),
-            Role::Assistant => Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
+            // Assistant: prefix uses default style (no special color or bold)
+            Role::Assistant => Style::default(),
+        };
+        let body_style = match cached.role {
+            Role::User => Style::default().fg(THEME.border_focus),
+            Role::Assistant => Style::default(),
         };
         let base = cached.lines.len();
         let collapsed = app.collapsed.get(idx).copied().unwrap_or(false);
@@ -341,12 +339,12 @@ fn draw_chat(f: &mut Frame, area: Rect, app: &mut App) {
                     } else if a < hb {
                         header_style
                     } else {
-                        Style::default()
+                        body_style
                     }
                 } else if a < hb {
                     header_style
                 } else {
-                    Style::default()
+                    body_style
                 };
                 spans.push(Span::styled(seg.to_string(), style));
             }
@@ -410,11 +408,8 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App, input_visible_lines: u16, in
     let offset_y = cursor_line_idx.saturating_sub(input_visible_lines.saturating_sub(1));
 
     let para = if app.input.is_empty() {
-        let hint = Line::from(Span::styled(
-            INPUT_HINT,
-            Style::default().fg(Color::DarkGray),
-        ));
-        Paragraph::new(hint)
+        // Render empty input area for a clean look
+        Paragraph::new(String::new())
             .block(block)
             .wrap(Wrap { trim: false })
             .scroll((0, 0))
@@ -470,10 +465,14 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App, _input_visible_lines: u16, 
             .as_ref()
             .map(|q| (q.clone(), app.search_current + 1, app.search_hits.len())),
         area.width.saturating_sub(2),
+        app.usage_prompt_tokens.zip(app.usage_completion_tokens),
+        app.temperature,
+        app.top_p,
+        app.max_tokens,
     );
     let help = Span::styled(tips, Style::default().fg(Color::DarkGray));
     let info = Line::from(vec![help]);
-    let para = Paragraph::new(info).block(Block::default().borders(Borders::ALL));
+    let para = Paragraph::new(info);
     f.render_widget(para, area);
 }
 
@@ -686,6 +685,8 @@ fn draw_slash_picker(f: &mut Frame, area: Rect, state: &crate::app::SlashPickerS
     let cursor_y = popup_area.y + 1;
     f.set_cursor_position(Position::new(cursor_x, cursor_y));
 }
+
+// no toast: usage info is rendered persistently in the status line above input
 
 fn draw_search(f: &mut Frame, area: Rect, state: &crate::app::SearchInput) {
     use unicode_width::UnicodeWidthStr;

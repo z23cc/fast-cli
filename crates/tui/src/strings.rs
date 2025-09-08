@@ -2,8 +2,11 @@
 
 use unicode_width::UnicodeWidthStr;
 
-pub const PREFIX_USER: &str = "You: ";
-pub const PREFIX_ASSISTANT: &str = "Assistant: ";
+// Minimal, space‑efficient role prefixes (ASCII)
+// User messages: blue '|' prefix (render color applied in UI)
+pub const PREFIX_USER: &str = "| ";
+// Assistant messages: '>' prefix
+pub const PREFIX_ASSISTANT: &str = "> ";
 
 pub const INPUT_HINT: &str = "Type message, Enter to send / Shift+Enter for newline";
 
@@ -71,6 +74,10 @@ pub fn build_status_line(
     provider: Option<(&str, &str, &str)>,
     search_info: Option<(String, usize, usize)>,
     max_width: u16,
+    usage: Option<(u32, u32)>,
+    temp: Option<f32>,
+    top_p: Option<f32>,
+    max_tokens: Option<u32>,
 ) -> String {
     let mut segments: Vec<String> = Vec::new();
     // Put provider info first for higher visibility on narrow terminals
@@ -83,6 +90,19 @@ pub fn build_status_line(
     ));
     segments.push(format!("Hist:{}", history_len));
     segments.push(format!("Ctx:{}", context_len));
+    if let Some(t) = temp {
+        segments.push(format!("T:{:.1}", t));
+    }
+    if let Some(p) = top_p {
+        segments.push(format!("P:{:.1}", p));
+    }
+    if let Some(m) = max_tokens {
+        segments.push(format!("Max:{}", m));
+    }
+    if let Some((p, c)) = usage {
+        let t = p.saturating_add(c);
+        segments.push(format!("Tok:{}/{}/{}", p, c, t));
+    }
     if let Some((q, cur, total)) = search_info {
         segments.push(if total > 0 {
             format!("Search:{} ({}/{})", q, cur, total)
