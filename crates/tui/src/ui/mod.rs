@@ -68,6 +68,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if let Some(state) = &app.model_picker {
         draw_model_picker(f, f.area(), state);
     }
+    if let Some(state) = &app.wire_picker {
+        draw_wire_picker(f, f.area(), state);
+    }
+    if let Some(state) = &app.slash_picker {
+        draw_slash_picker(f, f.area(), state);
+    }
     if app.show_help {
         draw_help(f, f.area());
     }
@@ -596,6 +602,89 @@ fn draw_model_picker(f: &mut Frame, area: Rect, state: &crate::app::ModelPickerS
     let para = Paragraph::new(lines).block(block);
     f.render_widget(Clear, popup_area);
     f.render_widget(para, popup_area);
+}
+
+fn draw_wire_picker(f: &mut Frame, area: Rect, state: &crate::app::WirePickerState) {
+    let popup_area = centered_rect(40, 40, area);
+    let block = Block::default()
+        .title(Span::styled(
+            " Select Wire ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL);
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(format!(">> {}", state.buffer)));
+    let max_list = popup_area.height.saturating_sub(4) as usize;
+    for (i, m) in state.filtered.iter().take(max_list).enumerate() {
+        let sel = i == state.selected;
+        let style = if sel {
+            Style::default()
+                .fg(THEME.sidebar_selected_fg)
+                .bg(THEME.sidebar_selected_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{} {}", if sel { ">" } else { " " }, m),
+            style,
+        )));
+    }
+    let para = Paragraph::new(lines).block(block);
+    f.render_widget(Clear, popup_area);
+    f.render_widget(para, popup_area);
+}
+
+fn draw_slash_picker(f: &mut Frame, area: Rect, state: &crate::app::SlashPickerState) {
+    use unicode_width::UnicodeWidthStr;
+    let popup_area = centered_rect(60, 40, area);
+    let block = Block::default()
+        .title(Span::styled(
+            " Commands ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL);
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(format!("/{}", state.buffer)));
+    let max_list = popup_area.height.saturating_sub(4) as usize;
+    for (i, (cmd, desc)) in state.filtered.iter().take(max_list).enumerate() {
+        let sel = i == state.selected;
+        let style = if sel {
+            Style::default()
+                .fg(THEME.sidebar_selected_fg)
+                .bg(THEME.sidebar_selected_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("/{}", cmd), style),
+            Span::raw("  "),
+            Span::styled(desc.clone(), Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+    let para = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
+    f.render_widget(Clear, popup_area);
+    f.render_widget(para, popup_area);
+    // place cursor after "/"
+    let cursor_x = popup_area.x
+        + 1
+        + UnicodeWidthStr::width(
+            state
+                .buffer
+                .graphemes(true)
+                .take(state.cursor)
+                .collect::<String>()
+                .as_str(),
+        ) as u16;
+    let cursor_y = popup_area.y + 1;
+    f.set_cursor_position(Position::new(cursor_x, cursor_y));
 }
 
 fn draw_search(f: &mut Frame, area: Rect, state: &crate::app::SearchInput) {

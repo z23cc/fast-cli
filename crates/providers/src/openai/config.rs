@@ -11,6 +11,7 @@ pub struct OpenAiFileConfig {
     pub stream_idle_timeout_ms: Option<u64>,
     pub timeout_ms: Option<u64>,
     pub model_providers: Option<serde_json::Value>,
+    pub model_suggestions: Option<Vec<String>>, // optional list of model names for pickers
 }
 
 #[derive(Clone, Debug)]
@@ -23,6 +24,7 @@ pub struct OpenAiConfig {
     pub stream_max_retries: u32,
     pub stream_idle_timeout: Duration,
     pub proxy: Option<String>,
+    pub model_suggestions: Vec<String>,
 }
 
 impl OpenAiConfig {
@@ -57,6 +59,37 @@ impl OpenAiConfig {
                         if let Some(idle) = file_cfg.stream_idle_timeout_ms {
                             stream_idle_timeout_ms = idle;
                         }
+                        // Suggestions (top-level list) if present
+                        let suggestions = file_cfg.model_suggestions.unwrap_or_default();
+                        if !suggestions.is_empty() {
+                            // We'll set them later in return struct
+                        }
+                    }
+                }
+            }
+        }
+
+        // Optionally read suggestions from model_providers map if not provided directly
+        let mut model_suggestions: Vec<String> = Vec::new();
+        if let Some(path) = Self::config_path() {
+            if path.exists() {
+                if let Ok(toml) = fs::read_to_string(&path) {
+                    if let Ok(file_cfg) = toml::from_str::<OpenAiFileConfig>(&toml) {
+                        if let Some(list) = file_cfg.model_suggestions {
+                            model_suggestions = list;
+                        } else if let Some(mp) = file_cfg.model_providers {
+                            // Try common shapes: { openai: { suggestions: [..] } }
+                            if let Some(openai) = mp.get("openai") {
+                                if let Some(arr) =
+                                    openai.get("suggestions").and_then(|v| v.as_array())
+                                {
+                                    model_suggestions = arr
+                                        .iter()
+                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                        .collect();
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -75,6 +108,7 @@ impl OpenAiConfig {
             stream_max_retries,
             stream_idle_timeout: Duration::from_millis(stream_idle_timeout_ms),
             proxy,
+            model_suggestions,
         })
     }
 

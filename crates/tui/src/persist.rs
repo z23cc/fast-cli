@@ -15,6 +15,9 @@ pub struct SavedState {
     // Runtime model/wire selection (optional for backward compatibility)
     pub model: Option<String>,
     pub wire_api: Option<String>,
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub max_tokens: Option<u32>,
 }
 
 impl From<&App> for SavedState {
@@ -26,6 +29,9 @@ impl From<&App> for SavedState {
             sidebar_scroll: a.sidebar_scroll,
             model: Some(a.model_label.clone()),
             wire_api: Some(a.wire_label.clone()),
+            temperature: a.temperature,
+            top_p: a.top_p,
+            max_tokens: a.max_tokens,
         }
     }
 }

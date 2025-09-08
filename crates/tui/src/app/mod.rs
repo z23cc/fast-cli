@@ -2,9 +2,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use fast_core::llm::ModelClient as _;
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tracing::{error, info};
 use unicode_segmentation::UnicodeSegmentation;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 pub mod chat;
 pub mod history;
@@ -105,15 +108,32 @@ pub struct App {
     pub context_current: usize,
     pub palette: Option<PaletteState>,
     pub model_picker: Option<ModelPickerState>,
+    pub wire_picker: Option<WirePickerState>,
+    pub slash_picker: Option<SlashPickerState>,
     pub llm_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     pub llm_cancel: Option<Arc<AtomicBool>>,
     // Provider/model info for status bar
     pub provider_label: String,
     pub model_label: String,
     pub wire_label: String,
+    // Sampling overrides
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub max_tokens: Option<u32>,
+    // Model suggestions from config
+    pub model_suggestions: Vec<String>,
 }
 
 impl App {
+    fn set_sampling_temp(&mut self, t: Option<f32>) {
+        self.temperature = t;
+    }
+    fn set_sampling_top_p(&mut self, p: Option<f32>) {
+        self.top_p = p;
+    }
+    fn set_sampling_max_tokens(&mut self, m: Option<u32>) {
+        self.max_tokens = m;
+    }
     // Returns true if a supported slash command was handled
     fn try_handle_slash_command(&mut self, text: &str) -> bool {
         let s = text.trim();
@@ -152,6 +172,50 @@ impl App {
                         self.wire_label
                     )));
                     self.collapsed.push(false);
+                }
+                true
+            }
+            "help" => {
+                self.show_help = true;
+                true
+            }
+            "temp" => {
+                if !arg.is_empty() {
+                    if let Ok(v) = arg.parse::<f32>() {
+                        self.set_sampling_temp(Some(v));
+                        self.messages.push(Message::assistant(format!(
+                            "[info] temperature set to {}",
+                            v
+                        )));
+                        self.collapsed.push(false);
+                        let _ = crate::persist::save_state(self);
+                    }
+                }
+                true
+            }
+            "top_p" => {
+                if !arg.is_empty() {
+                    if let Ok(v) = arg.parse::<f32>() {
+                        self.set_sampling_top_p(Some(v));
+                        self.messages
+                            .push(Message::assistant(format!("[info] top_p set to {}", v)));
+                        self.collapsed.push(false);
+                        let _ = crate::persist::save_state(self);
+                    }
+                }
+                true
+            }
+            "max_tokens" => {
+                if !arg.is_empty() {
+                    if let Ok(v) = arg.parse::<u32>() {
+                        self.set_sampling_max_tokens(Some(v));
+                        self.messages.push(Message::assistant(format!(
+                            "[info] max_tokens set to {}",
+                            v
+                        )));
+                        self.collapsed.push(false);
+                        let _ = crate::persist::save_state(self);
+                    }
                 }
                 true
             }
@@ -201,16 +265,23 @@ impl App {
             context_current: 0,
             palette: None,
             model_picker: None,
+            wire_picker: None,
+            slash_picker: None,
             llm_rx: None,
             llm_cancel: None,
             provider_label: String::from("OpenAI"),
             model_label: String::from("gpt-5"),
             wire_label: String::from("responses"),
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            model_suggestions: Vec::new(),
         };
         // Try to read provider config for status
         if let Ok(cfg) = providers::openai::config::OpenAiConfig::from_env_and_file() {
             s.model_label = cfg.model.clone();
             s.wire_label = cfg.wire_api.clone();
+            s.model_suggestions = cfg.model_suggestions.clone();
         }
         if let Ok(Some(p)) = crate::persist::load_state() {
             if !p.sessions.is_empty() {
@@ -226,6 +297,15 @@ impl App {
             }
             if let Some(w) = p.wire_api {
                 s.wire_label = w;
+            }
+            if let Some(t) = p.temperature {
+                s.temperature = Some(t);
+            }
+            if let Some(tp) = p.top_p {
+                s.top_p = Some(tp);
+            }
+            if let Some(m) = p.max_tokens {
+                s.max_tokens = Some(m);
             }
         }
         if !s.sessions.is_empty() {
@@ -288,6 +368,9 @@ impl App {
         // Capture runtime selections for this request
         let selected_model = self.model_label.clone();
         let selected_wire = self.wire_label.clone();
+        let sel_temp = self.temperature;
+        let sel_top_p = self.top_p;
+        let sel_max_tokens = self.max_tokens;
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("rt");
             let _ = rt.block_on(async move {
@@ -309,9 +392,9 @@ impl App {
                 };
                 let opts = fast_core::llm::ChatOpts {
                     model: selected_model.clone(),
-                    temperature: None,
-                    top_p: None,
-                    max_tokens: None,
+                    temperature: sel_temp,
+                    top_p: sel_top_p,
+                    max_tokens: sel_max_tokens,
                 };
                 let wire = match selected_wire.as_str() {
                     "chat" => fast_core::llm::ChatWire::Chat,
@@ -521,6 +604,165 @@ impl App {
                 return;
             }
 
+            if self.wire_picker.is_some() {
+                let st = match &mut self.wire_picker {
+                    Some(s) => s,
+                    None => unreachable!(),
+                };
+                match key.code {
+                    KeyCode::Esc => {
+                        self.wire_picker = None;
+                    }
+                    KeyCode::Enter => {
+                        if let Some(sel) = st.filtered.get(st.selected).cloned() {
+                            self.wire_label = sel;
+                            self.wire_picker = None;
+                            let _ = crate::persist::save_state(self);
+                            self.messages.push(Message::assistant(format!(
+                                "[info] wire set to '{}'",
+                                self.wire_label
+                            )));
+                            self.collapsed.push(false);
+                        }
+                    }
+                    KeyCode::Up => {
+                        if st.selected > 0 {
+                            st.selected -= 1;
+                        }
+                    }
+                    KeyCode::Down => {
+                        if st.selected + 1 < st.filtered.len() {
+                            st.selected += 1;
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        if st.cursor > 0 {
+                            let mut parts: Vec<&str> = st.buffer.graphemes(true).collect();
+                            let c = st.cursor.min(parts.len());
+                            parts.remove(c - 1);
+                            st.buffer = parts.concat();
+                            st.cursor -= 1;
+                            App::wire_filter(st);
+                        }
+                    }
+                    KeyCode::Delete => {
+                        let mut parts: Vec<&str> = st.buffer.graphemes(true).collect();
+                        let c = st.cursor.min(parts.len());
+                        if c < parts.len() {
+                            parts.remove(c);
+                            st.buffer = parts.concat();
+                            App::wire_filter(st);
+                        }
+                    }
+                    KeyCode::Left => {
+                        if st.cursor > 0 {
+                            st.cursor -= 1;
+                        }
+                    }
+                    KeyCode::Right => {
+                        let l = st.buffer.graphemes(true).count();
+                        if st.cursor < l {
+                            st.cursor += 1;
+                        }
+                    }
+                    KeyCode::Home => {
+                        st.cursor = 0;
+                    }
+                    KeyCode::End => {
+                        st.cursor = st.buffer.graphemes(true).count();
+                    }
+                    KeyCode::Char(ch) => {
+                        if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                            let mut parts: Vec<&str> = st.buffer.graphemes(true).collect();
+                            let c = st.cursor.min(parts.len());
+                            let mut buf = [0u8; 4];
+                            parts.insert(c, ch.encode_utf8(&mut buf));
+                            st.buffer = parts.concat();
+                            st.cursor += 1;
+                            App::wire_filter(st);
+                        }
+                    }
+                    _ => {}
+                }
+                return;
+            }
+
+            if self.slash_picker.is_some() {
+                let st = match &mut self.slash_picker {
+                    Some(s) => s,
+                    None => unreachable!(),
+                };
+                match key.code {
+                    KeyCode::Esc => {
+                        self.slash_picker = None;
+                    }
+                    KeyCode::Enter => {
+                        if let Some((cmd, _)) = st.filtered.get(st.selected).cloned() {
+                            self.slash_execute(&cmd);
+                        }
+                    }
+                    KeyCode::Up => {
+                        if st.selected > 0 {
+                            st.selected -= 1;
+                        }
+                    }
+                    KeyCode::Down => {
+                        if st.selected + 1 < st.filtered.len() {
+                            st.selected += 1;
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        if st.cursor > 0 {
+                            let mut parts: Vec<&str> = st.buffer.graphemes(true).collect();
+                            let c = st.cursor.min(parts.len());
+                            parts.remove(c - 1);
+                            st.buffer = parts.concat();
+                            st.cursor -= 1;
+                            App::slash_filter(st);
+                        }
+                    }
+                    KeyCode::Delete => {
+                        let mut parts: Vec<&str> = st.buffer.graphemes(true).collect();
+                        let c = st.cursor.min(parts.len());
+                        if c < parts.len() {
+                            parts.remove(c);
+                            st.buffer = parts.concat();
+                            App::slash_filter(st);
+                        }
+                    }
+                    KeyCode::Left => {
+                        if st.cursor > 0 {
+                            st.cursor -= 1;
+                        }
+                    }
+                    KeyCode::Right => {
+                        let l = st.buffer.graphemes(true).count();
+                        if st.cursor < l {
+                            st.cursor += 1;
+                        }
+                    }
+                    KeyCode::Home => {
+                        st.cursor = 0;
+                    }
+                    KeyCode::End => {
+                        st.cursor = st.buffer.graphemes(true).count();
+                    }
+                    KeyCode::Char(ch) => {
+                        if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                            let mut parts: Vec<&str> = st.buffer.graphemes(true).collect();
+                            let c = st.cursor.min(parts.len());
+                            let mut buf = [0u8; 4];
+                            parts.insert(c, ch.encode_utf8(&mut buf));
+                            st.buffer = parts.concat();
+                            st.cursor += 1;
+                            App::slash_filter(st);
+                        }
+                    }
+                    _ => {}
+                }
+                return;
+            }
+
             if self.show_help {
                 match key.code {
                     KeyCode::Esc | KeyCode::F(1) => {
@@ -690,7 +932,9 @@ impl App {
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     // Ctrl+C: cancel active stream if any; otherwise quit
                     if self.llm_rx.is_some() {
-                        if let Some(cancel) = &self.llm_cancel { cancel.store(true, Ordering::Relaxed); }
+                        if let Some(cancel) = &self.llm_cancel {
+                            cancel.store(true, Ordering::Relaxed);
+                        }
                     } else {
                         self.should_quit = true;
                     }
@@ -743,9 +987,11 @@ impl App {
                 }
                 KeyCode::Backspace if matches!(self.focus, Focus::Input) => {
                     self.delete_left_grapheme();
+                    self.update_slash_picker_on_input_change();
                 }
                 KeyCode::Delete if matches!(self.focus, Focus::Input) => {
                     self.delete_right_grapheme();
+                    self.update_slash_picker_on_input_change();
                 }
                 KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.delete_prev_word();
@@ -787,6 +1033,7 @@ impl App {
                         let mut buf = [0u8; 4];
                         let s = ch.encode_utf8(&mut buf);
                         self.insert_text(s);
+                        self.update_slash_picker_on_input_change();
                     }
                 }
                 KeyCode::Left if key.modifiers.is_empty() && matches!(self.focus, Focus::Input) => {
@@ -986,7 +1233,10 @@ impl App {
                         }
                         self.llm_rx = None;
                         self.llm_cancel = None;
-                        let _ = crate::persist::save_session(self.current_session_name(), &self.messages);
+                        let _ = crate::persist::save_session(
+                            self.current_session_name(),
+                            &self.messages,
+                        );
                         break;
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -995,7 +1245,10 @@ impl App {
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         self.llm_rx = None;
                         self.llm_cancel = None;
-                        let _ = crate::persist::save_session(self.current_session_name(), &self.messages);
+                        let _ = crate::persist::save_session(
+                            self.current_session_name(),
+                            &self.messages,
+                        );
                         break;
                     }
                 }
@@ -1040,6 +1293,8 @@ pub enum PaletteAction {
     RenameSession,
     DeleteSession,
     OpenSearch,
+    SwitchModel,
+    SwitchWire,
     Quit,
 }
 
@@ -1052,6 +1307,8 @@ impl PaletteAction {
             PaletteAction::RenameSession => "Rename session",
             PaletteAction::DeleteSession => "Delete session",
             PaletteAction::OpenSearch => "Open search",
+            PaletteAction::SwitchModel => "Switch model",
+            PaletteAction::SwitchWire => "Switch wire",
             PaletteAction::Quit => "Quit",
         }
     }
@@ -1077,6 +1334,8 @@ impl App {
             PaletteAction::RenameSession,
             PaletteAction::DeleteSession,
             PaletteAction::OpenSearch,
+            PaletteAction::SwitchModel,
+            PaletteAction::SwitchWire,
             PaletteAction::Quit,
         ];
         let q = st.buffer.to_lowercase();
@@ -1111,6 +1370,12 @@ impl App {
             PaletteAction::OpenSearch => {
                 self.open_search();
             }
+            PaletteAction::SwitchModel => {
+                self.open_model_picker();
+            }
+            PaletteAction::SwitchWire => {
+                self.open_wire_picker();
+            }
             PaletteAction::Quit => {
                 self.should_quit = true;
             }
@@ -1136,6 +1401,8 @@ impl App {
             PaletteAction::RenameSession,
             PaletteAction::DeleteSession,
             PaletteAction::OpenSearch,
+            PaletteAction::SwitchModel,
+            PaletteAction::SwitchWire,
             PaletteAction::Quit,
         ];
         let q = st.buffer.to_lowercase();
@@ -1181,23 +1448,24 @@ impl App {
         if !self.model_label.trim().is_empty() {
             out.push(self.model_label.clone());
         }
-        for m in [
-            // Codex presets for GPT-5 family
-            "gpt-5",
-            "gpt-5-high",
-            "gpt-5-medium",
-            "gpt-5-low",
-            "gpt-5-minimal",
-            // Other common models
-            "gpt-4o",
-            "gpt-4o-mini",
-            "o3",
-            "o3-mini",
-        ]
-        .iter()
-        {
-            if out.iter().all(|x| x != m) {
-                out.push((*m).to_string());
+        let source: Vec<String> = if !self.model_suggestions.is_empty() {
+            self.model_suggestions.clone()
+        } else {
+            vec![
+                "gpt-5".to_string(),
+                "gpt-5-high".to_string(),
+                "gpt-5-medium".to_string(),
+                "gpt-5-low".to_string(),
+                "gpt-5-minimal".to_string(),
+                "gpt-4o".to_string(),
+                "gpt-4o-mini".to_string(),
+                "o3".to_string(),
+                "o3-mini".to_string(),
+            ]
+        };
+        for m in source {
+            if out.iter().all(|x| x != &m) {
+                out.push(m);
             }
         }
         out
@@ -1215,5 +1483,134 @@ impl App {
                 .collect();
         }
         st.selected = st.selected.min(st.filtered.len().saturating_sub(1));
+    }
+}
+
+#[derive(Clone)]
+pub struct WirePickerState {
+    pub buffer: String,
+    pub cursor: usize,
+    pub filtered: Vec<String>,
+    pub selected: usize,
+}
+
+impl App {
+    fn open_wire_picker(&mut self) {
+        let filtered = vec![
+            "responses".to_string(),
+            "chat".to_string(),
+            "auto".to_string(),
+        ];
+        self.wire_picker = Some(WirePickerState {
+            buffer: String::new(),
+            cursor: 0,
+            filtered,
+            selected: 0,
+        });
+    }
+    fn wire_filter(st: &mut WirePickerState) {
+        let all = vec![
+            "responses".to_string(),
+            "chat".to_string(),
+            "auto".to_string(),
+        ];
+        let q = st.buffer.to_lowercase();
+        if q.is_empty() {
+            st.filtered = all;
+        } else {
+            st.filtered = all.into_iter().filter(|m| m.contains(&q)).collect();
+        }
+        st.selected = st.selected.min(st.filtered.len().saturating_sub(1));
+    }
+}
+
+#[derive(Clone)]
+pub struct SlashPickerState {
+    pub buffer: String,
+    pub cursor: usize,
+    pub filtered: Vec<(String, String)>, // (cmd, desc)
+    pub selected: usize,
+}
+
+impl App {
+    fn open_slash_picker(&mut self, initial: &str) {
+        let mut st = SlashPickerState {
+            buffer: initial.to_string(),
+            cursor: initial.chars().count(),
+            filtered: Vec::new(),
+            selected: 0,
+        };
+        Self::slash_filter(&mut st);
+        self.slash_picker = Some(st);
+    }
+    fn slash_all() -> Vec<(String, String)> {
+        vec![
+            ("model".into(), "pick a model".into()),
+            ("wire".into(), "select protocol: responses/chat/auto".into()),
+            ("help".into(), "open help".into()),
+            ("temp".into(), "set temperature (0-2)".into()),
+            ("top_p".into(), "set nucleus sampling (0-1)".into()),
+            ("max_tokens".into(), "set completion cap".into()),
+        ]
+    }
+    fn slash_filter(st: &mut SlashPickerState) {
+        let q = st.buffer.to_lowercase();
+        let all = Self::slash_all();
+        if q.is_empty() {
+            st.filtered = all;
+        } else {
+            st.filtered = all
+                .into_iter()
+                .filter(|(c, d)| c.contains(&q) || d.to_lowercase().contains(&q))
+                .collect();
+        }
+        st.selected = st.selected.min(st.filtered.len().saturating_sub(1));
+    }
+    fn slash_execute(&mut self, cmd: &str) {
+        match cmd {
+            "model" => {
+                self.input.clear();
+                self.input_cursor = 0;
+                self.open_model_picker();
+            }
+            "wire" => {
+                self.input.clear();
+                self.input_cursor = 0;
+                self.open_wire_picker();
+            }
+            "help" => {
+                self.show_help = true;
+            }
+            "temp" | "top_p" | "max_tokens" => {
+                self.input = format!("/{} ", cmd);
+                self.input_cursor = self.input.chars().count();
+            }
+            _ => {}
+        }
+        self.slash_picker = None;
+        self.dirty = true;
+    }
+    fn update_slash_picker_on_input_change(&mut self) {
+        // If input starts with '/<token>' and no whitespace yet, show/update slash picker
+        let s = self.input.clone();
+        if let Some(rest) = s.strip_prefix('/') {
+            if !rest.contains(char::is_whitespace) {
+                match &mut self.slash_picker {
+                    Some(st) => {
+                        st.buffer = rest.to_string();
+                        st.cursor = rest.chars().count();
+                        Self::slash_filter(st);
+                    }
+                    None => {
+                        self.open_slash_picker(rest);
+                    }
+                }
+                return;
+            }
+        }
+        // Otherwise close if open
+        if self.slash_picker.is_some() {
+            self.slash_picker = None;
+        }
     }
 }
